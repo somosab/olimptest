@@ -1,0 +1,22 @@
+# Maxfiy fayllar — HECH QACHON GITHUBGA YUKLAMANG
+.env
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.python-version
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Lokal ma'lumotlar
+.olimptest/
