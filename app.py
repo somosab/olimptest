@@ -1,1247 +1,1164 @@
 """
-OlimpTest — Streamlit dasturi
-Olimpiada va testlarga AI yordamida vaqtli mashq qilish platformasi.
-
-Xususiyatlari:
-- Foydalanuvchi ism/familya kiritadi
-- Sidebar orqali test fayllarini yuklaydi (PDF, DOCX, TXT, rasm)
-- Vaqt belgilaydi va testni boshlaydi
-- Groq AI (LLaMA 3.3 70B + Vision) faylni o'qiydi, savollarni ajratadi
-- Javoblar yo'q bo'lsa AI o'zi yechadi
-- Test boshqaruvi: navigatsiya, taymer, javoblarni belgilash
-- Test yakunida natija va har bir savol bo'yicha tushuntirish
-
-Ishga tushirish:
-    pip install -r requirements.txt
-    streamlit run app.py
-
-Muhit o'zgaruvchilari:
-    GROQ_API_KEY — Groq API kaliti (https://console.groq.com/keys dan oling)
+OlimpTest - AI yordamida olimpiada mashq platformasi
+Groq + Tesseract OCR (matematik formulalar va rasmlar uchun)
 """
-
-from __future__ import annotations
-
-import base64
+import streamlit as st
+import os
 import io
 import json
-import os
-import re
 import time
-import uuid
-from dataclasses import dataclass, field, asdict
+import base64
+import re
+import hashlib
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Any, Optional
+from typing import List, Dict, Optional, Tuple, Any
 
-import streamlit as st
-from dotenv import load_dotenv
-from groq import Groq
-
-# Optional file readers (gracefully handle missing libraries)
+# === Tashqi kutubxonalar ===
 try:
-    import pypdf  # type: ignore
-    HAS_PYPDF = True
+    from groq import Groq
 except ImportError:
-    HAS_PYPDF = False
+    st.error("Groq kutubxonasi o'rnatilmagan. `pip install groq` ni bajaring.")
+    st.stop()
 
-try:
-    from pdf2image import convert_from_bytes  # type: ignore
-    HAS_PDF2IMAGE = True
-except ImportError:
-    HAS_PDF2IMAGE = False
+from pypdf import PdfReader
+from docx import Document
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+import numpy as np
 
+# OCR uchun - ixtiyoriy importlar
 try:
-    import docx  # type: ignore
-    HAS_DOCX = True
+    import pytesseract
+    TESSERACT_AVAILABLE = True
 except ImportError:
-    HAS_DOCX = False
+    TESSERACT_AVAILABLE = False
 
 try:
-    from PIL import Image  # type: ignore
-    HAS_PIL = True
+    from pdf2image import convert_from_bytes
+    PDF2IMAGE_AVAILABLE = True
 except ImportError:
-    HAS_PIL = False
+    PDF2IMAGE_AVAILABLE = False
+
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
 
 
-# ============================================================================
-#                              KONFIGURATSIYA
-# ============================================================================
+# ==========================================================================
+# KONFIGURATSIYA
+# ==========================================================================
 
-load_dotenv()
-
-APP_TITLE = "OlimpTest — Olimpiada mashq platformasi"
-APP_ICON = "🏆"
-APP_TAGLINE = "AI yordamida olimpiada va testlarga vaqtli mashq"
+st.set_page_config(
+    page_title="OlimpTest - Olimpiada Mashq Platformasi",
+    page_icon="🏆",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 # Groq modellari
-TEXT_MODEL = "llama-3.3-70b-versatile"   # Strukturali matn tahlili uchun
-VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"  # Rasm o'qish uchun
-FALLBACK_VISION_MODEL = "llama-3.2-90b-vision-preview"
+TEXT_MODEL = "llama-3.3-70b-versatile"
+FAST_MODEL = "llama-3.1-8b-instant"
+VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
-# Saqlash papkasi
-DATA_DIR = Path.home() / ".olimptest"
-DATA_DIR.mkdir(exist_ok=True)
-TESTS_DIR = DATA_DIR / "tests"
-TESTS_DIR.mkdir(exist_ok=True)
-RESULTS_FILE = DATA_DIR / "results.json"
+# OCR til konfiguratsiyasi (Tesseract til kodlari)
+# equ = matematik tenglamalar, uzb = o'zbek, uzb_cyrl = o'zbek kirill
+OCR_LANGS = "uzb+uzb_cyrl+rus+eng+equ"
+OCR_LANGS_FALLBACK = "rus+eng"
 
-# Qo'llab-quvvatlanadigan fayl turlari
-SUPPORTED_EXTENSIONS = ["pdf", "docx", "txt", "md", "png", "jpg", "jpeg", "webp"]
+MAX_FILE_SIZE_MB = 25
+MAX_PDF_PAGES = 30
 
 
-# ============================================================================
-#                              MA'LUMOT TURLARI
-# ============================================================================
+# ==========================================================================
+# CSS - Premium dark-gold theme
+# ==========================================================================
 
-@dataclass
-class Question:
-    """Bitta test savoli."""
-    number: int
-    question: str
-    options: list[str] = field(default_factory=list)
-    correct_answer: str = ""
-    explanation: str = ""
+CUSTOM_CSS = """
+<style>
+    .stApp {
+        background: linear-gradient(135deg, #0a0a0f 0%, #15151f 100%);
+    }
+    .main-title {
+        font-size: 3rem;
+        font-weight: 800;
+        background: linear-gradient(135deg, #f59e0b 0%, #fbbf24 50%, #f59e0b 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        text-align: center;
+        margin: 1rem 0;
+        letter-spacing: -0.02em;
+    }
+    .subtitle {
+        text-align: center;
+        color: #94a3b8;
+        font-size: 1.1rem;
+        margin-bottom: 2rem;
+    }
+    .stat-card {
+        background: linear-gradient(135deg, rgba(245, 158, 11, 0.08) 0%, rgba(251, 191, 36, 0.04) 100%);
+        border: 1px solid rgba(245, 158, 11, 0.2);
+        border-radius: 16px;
+        padding: 1.5rem;
+        text-align: center;
+        backdrop-filter: blur(10px);
+    }
+    .stat-value {
+        font-size: 2.5rem;
+        font-weight: 800;
+        color: #fbbf24;
+        margin: 0;
+    }
+    .stat-label {
+        color: #94a3b8;
+        font-size: 0.85rem;
+        margin-top: 0.25rem;
+    }
+    .question-card {
+        background: rgba(30, 30, 45, 0.6);
+        border: 1px solid rgba(245, 158, 11, 0.15);
+        border-radius: 16px;
+        padding: 2rem;
+        margin: 1rem 0;
+        backdrop-filter: blur(10px);
+    }
+    .timer-box {
+        background: linear-gradient(135deg, rgba(245, 158, 11, 0.1), rgba(251, 191, 36, 0.05));
+        border: 2px solid rgba(245, 158, 11, 0.4);
+        border-radius: 12px;
+        padding: 0.75rem 1.5rem;
+        text-align: center;
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: #fbbf24;
+        font-family: 'Courier New', monospace;
+    }
+    .timer-warning {
+        background: linear-gradient(135deg, rgba(239, 68, 68, 0.2), rgba(220, 38, 38, 0.1));
+        border-color: rgba(239, 68, 68, 0.6);
+        color: #ef4444;
+        animation: pulse 1s infinite;
+    }
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.6; }
+    }
+    .correct-answer {
+        background: rgba(34, 197, 94, 0.1);
+        border-left: 4px solid #22c55e;
+        padding: 1rem;
+        border-radius: 8px;
+        margin: 0.5rem 0;
+    }
+    .wrong-answer {
+        background: rgba(239, 68, 68, 0.1);
+        border-left: 4px solid #ef4444;
+        padding: 1rem;
+        border-radius: 8px;
+        margin: 0.5rem 0;
+    }
+    .stButton > button {
+        background: linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%);
+        color: #0a0a0f;
+        border: none;
+        border-radius: 10px;
+        padding: 0.6rem 1.5rem;
+        font-weight: 700;
+        transition: all 0.3s ease;
+    }
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 10px 25px rgba(245, 158, 11, 0.3);
+    }
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #0a0a0f 0%, #15151f 100%);
+        border-right: 1px solid rgba(245, 158, 11, 0.15);
+    }
+    .file-item {
+        background: rgba(245, 158, 11, 0.05);
+        border: 1px solid rgba(245, 158, 11, 0.15);
+        border-radius: 10px;
+        padding: 0.75rem;
+        margin: 0.5rem 0;
+    }
+    .ocr-info {
+        background: rgba(59, 130, 246, 0.08);
+        border-left: 3px solid #3b82f6;
+        padding: 0.5rem 1rem;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        color: #93c5fd;
+        margin: 0.5rem 0;
+    }
+</style>
+"""
 
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "Question":
-        return cls(
-            number=int(data.get("number", 0)),
-            question=str(data.get("question", "")),
-            options=list(data.get("options", []) or []),
-            correct_answer=str(data.get("correct_answer", "")),
-            explanation=str(data.get("explanation", "")),
-        )
-
-
-@dataclass
-class TestFile:
-    """Saqlangan test fayli haqida ma'lumot."""
-    id: str
-    file_name: str
-    size: int
-    created_at: float
-    file_type: str
-    storage_path: str
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "TestFile":
-        return cls(**data)
-
-
-@dataclass
-class TestResult:
-    """Test yakuni natijasi."""
-    id: str
-    student_name: str
-    test_title: str
-    file_name: str
-    total_questions: int
-    correct: int
-    wrong: int
-    skipped: int
-    percent: float
-    duration_used_sec: int
-    duration_total_sec: int
-    finished_at: float
-    questions: list[dict]
-    answers: dict[str, str]
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-
-# ============================================================================
-#                              FAYL O'QISH
-# ============================================================================
-
-def extract_text_from_pdf(data: bytes) -> str:
-    """PDF dan matn ajratib oladi."""
-    if not HAS_PYPDF:
-        return ""
-    try:
-        reader = pypdf.PdfReader(io.BytesIO(data))
-        chunks: list[str] = []
-        for page in reader.pages:
-            text = page.extract_text() or ""
-            if text.strip():
-                chunks.append(text)
-        return "\n\n".join(chunks)
-    except Exception as e:
-        st.warning(f"PDF matnini o'qishda xato: {e}")
-        return ""
-
-
-def render_pdf_first_pages_as_images(data: bytes, max_pages: int = 3) -> list[bytes]:
-    """Skanerlangan PDF uchun: birinchi sahifalarni rasmlarga aylantiradi."""
-    if not HAS_PDF2IMAGE:
-        return []
-    try:
-        images = convert_from_bytes(data, dpi=180, first_page=1, last_page=max_pages)
-        out: list[bytes] = []
-        for img in images:
-            buf = io.BytesIO()
-            img.save(buf, format="PNG")
-            out.append(buf.getvalue())
-        return out
-    except Exception as e:
-        st.info(f"PDF ni rasmga aylantirib bo'lmadi: {e}. (poppler kerak bo'lishi mumkin)")
-        return []
-
-
-def extract_text_from_docx(data: bytes) -> str:
-    """Word (.docx) dan matn ajratadi."""
-    if not HAS_DOCX:
-        return ""
-    try:
-        document = docx.Document(io.BytesIO(data))
-        paragraphs = [p.text for p in document.paragraphs if p.text.strip()]
-        # Jadvallarni ham qo'shamiz
-        for table in document.tables:
-            for row in table.rows:
-                row_text = " | ".join(cell.text.strip() for cell in row.cells)
-                if row_text.strip("| "):
-                    paragraphs.append(row_text)
-        return "\n".join(paragraphs)
-    except Exception as e:
-        st.warning(f"Word faylini o'qishda xato: {e}")
-        return ""
-
-
-def normalize_image_to_png(data: bytes) -> bytes:
-    """Rasmni PNG formatga o'tkazadi (JPEG/WEBP/etc → PNG)."""
-    if not HAS_PIL:
-        return data
-    try:
-        img = Image.open(io.BytesIO(data))
-        if img.mode not in ("RGB", "RGBA"):
-            img = img.convert("RGB")
-        # Juda katta bo'lsa kichraytiramiz (vision model limitiga mos)
-        max_dim = 1600
-        if max(img.size) > max_dim:
-            ratio = max_dim / max(img.size)
-            new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
-            img = img.resize(new_size, Image.LANCZOS)
-        buf = io.BytesIO()
-        img.save(buf, format="PNG", optimize=True)
-        return buf.getvalue()
-    except Exception:
-        return data
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
-def read_file_payload(file_bytes: bytes, file_name: str) -> dict:
-    """
-    Faylni AI uchun tayyorlaydi.
+# ==========================================================================
+# SESSIYA STATE
+# ==========================================================================
 
-    Qaytaradi: {"text": str, "images": [base64_png, ...]}
-    """
-    name = file_name.lower()
-    payload: dict = {"text": "", "images": []}
-
-    # PDF
-    if name.endswith(".pdf"):
-        text = extract_text_from_pdf(file_bytes)
-        if text and len(text.strip()) > 50:
-            payload["text"] = text
-        else:
-            # Skanerlangan PDF — rasmga aylantirib vision model bilan o'qiymiz
-            images = render_pdf_first_pages_as_images(file_bytes, max_pages=3)
-            for img in images:
-                payload["images"].append(base64.b64encode(img).decode("ascii"))
-        return payload
-
-    # DOCX
-    if name.endswith(".docx"):
-        payload["text"] = extract_text_from_docx(file_bytes)
-        return payload
-
-    # Plain text
-    if name.endswith((".txt", ".md", ".csv")):
-        try:
-            payload["text"] = file_bytes.decode("utf-8", errors="ignore")
-        except Exception:
-            payload["text"] = ""
-        return payload
-
-    # Rasmlar
-    if name.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")):
-        png = normalize_image_to_png(file_bytes)
-        payload["images"].append(base64.b64encode(png).decode("ascii"))
-        return payload
-
-    # Boshqa — matn sifatida sinab ko'ramiz
-    try:
-        payload["text"] = file_bytes.decode("utf-8", errors="ignore")
-    except Exception:
-        pass
-    return payload
+def init_session_state():
+    defaults = {
+        "first_name": "",
+        "last_name": "",
+        "duration_min": 30,
+        "uploaded_files": [],
+        "active_file_idx": None,
+        "extracted_questions": None,
+        "test_started": False,
+        "test_finished": False,
+        "test_start_time": None,
+        "user_answers": {},
+        "current_question_idx": 0,
+        "test_history": [],
+        "extraction_in_progress": False,
+        "ocr_method": "auto",
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
 
-# ============================================================================
-#                              GROQ AI BILAN ISHLASH
-# ============================================================================
+init_session_state()
+
+
+# ==========================================================================
+# GROQ KLIENT
+# ==========================================================================
 
 def get_groq_client() -> Optional[Groq]:
-    """Groq mijozini yaratadi yoki sozlanmagan bo'lsa None qaytaradi."""
-    # Birinchi: Streamlit Secrets (Streamlit Cloud uchun)
-    # Keyin: muhit o'zgaruvchisi (.env, lokal ishga tushirish)
-    # Oxiri: foydalanuvchi qo'lda kiritgan kalit
+    """Streamlit secrets, env, yoki manual input dan API key oladi."""
     api_key = ""
     try:
         api_key = st.secrets.get("GROQ_API_KEY", "")
     except Exception:
-        api_key = ""
+        pass
     if not api_key:
         api_key = os.getenv("GROQ_API_KEY", "")
     if not api_key:
-        api_key = st.session_state.get("groq_api_key", "")
+        api_key = st.session_state.get("manual_api_key", "")
     if not api_key:
         return None
     try:
         return Groq(api_key=api_key)
     except Exception as e:
-        st.error(f"Groq mijozini yaratib bo'lmadi: {e}")
+        st.error(f"Groq klient xatosi: {e}")
         return None
 
 
-SYSTEM_PROMPT = """Siz olimpiada test fayllarini tahlil qiluvchi aqlli yordamchisiz.
+# ==========================================================================
+# OCR — TESSERACT (matematik formulalar, qo'lyozma, rasmlar uchun)
+# ==========================================================================
 
-Vazifangiz:
-1. Foydalanuvchi yuborgan matn yoki rasmdan barcha test savollarini ajratib oling.
-2. Har bir savol uchun:
-   - Raqamini, savol matnini, variantlarini (agar mavjud bo'lsa) yozing.
-   - Agar javoblar kaliti (answer key) berilgan bo'lsa — undan foydalaning.
-   - Agar javoblar berilmagan bo'lsa — siz O'ZINGIZ to'g'ri javobni TOPING.
-     Siz aqlli AI siz va matematika, fizika, kimyo, biologiya, informatika,
-     tarix, geografiya, til va h.k. olimpiada savollarini yecha olasiz.
-3. Qisqa tushuntirish bering (nima uchun bu javob to'g'ri).
+def preprocess_image_for_ocr(image: Image.Image) -> Image.Image:
+    """Rasmni OCR uchun sifatini oshirish: grayscale, kontrast, denoise, threshold."""
+    try:
+        # RGB ga o'tkazish
+        if image.mode != "RGB":
+            image = image.convert("RGB")
 
-Javobni FAQAT JSON formatda qaytaring. Boshqa hech qanday matn yozmang.
-Sxema:
+        # Hajmni oshirish (kichik rasmlarda OCR yomon ishlaydi)
+        w, h = image.size
+        if max(w, h) < 1500:
+            scale = 1500 / max(w, h)
+            new_size = (int(w * scale), int(h * scale))
+            image = image.resize(new_size, Image.LANCZOS)
+
+        # OpenCV bilan murakkab preprocessing
+        if CV2_AVAILABLE:
+            img_array = np.array(image)
+            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+
+            # Denoise
+            denoised = cv2.fastNlMeansDenoising(gray, None, h=10, templateWindowSize=7, searchWindowSize=21)
+
+            # Adaptive threshold (matematik formulalar uchun yaxshi)
+            thresh = cv2.adaptiveThreshold(
+                denoised, 255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY,
+                31, 15
+            )
+
+            return Image.fromarray(thresh)
+        else:
+            # Faqat PIL bilan
+            gray = image.convert("L")
+            enhancer = ImageEnhance.Contrast(gray)
+            enhanced = enhancer.enhance(2.0)
+            sharpened = enhanced.filter(ImageFilter.SHARPEN)
+            return sharpened
+    except Exception as e:
+        st.warning(f"Preprocessing xatosi (asl rasm ishlatiladi): {e}")
+        return image
+
+
+def ocr_image_tesseract(image: Image.Image, lang: str = OCR_LANGS) -> str:
+    """Rasmdan Tesseract OCR yordamida matn ajratib olish."""
+    if not TESSERACT_AVAILABLE:
+        return ""
+
+    try:
+        processed = preprocess_image_for_ocr(image)
+
+        # Birinchi urinish — to'liq tillar bilan
+        try:
+            text = pytesseract.image_to_string(
+                processed,
+                lang=lang,
+                config="--oem 3 --psm 6"  # PSM 6 = uniform block of text
+            )
+            if text.strip():
+                return text.strip()
+        except pytesseract.TesseractError:
+            pass
+
+        # Fallback — kamroq tillar
+        try:
+            text = pytesseract.image_to_string(
+                processed,
+                lang=OCR_LANGS_FALLBACK,
+                config="--oem 3 --psm 6"
+            )
+            return text.strip()
+        except pytesseract.TesseractError:
+            pass
+
+        # Oxirgi fallback — faqat ingliz
+        text = pytesseract.image_to_string(processed, lang="eng", config="--oem 3 --psm 6")
+        return text.strip()
+    except Exception as e:
+        return f"[OCR xatosi: {e}]"
+
+
+def ocr_image_with_layout(image: Image.Image, lang: str = OCR_LANGS) -> str:
+    """Maxsus PSM rejimlarini sinash — eng yaxshi natijani tanlash."""
+    if not TESSERACT_AVAILABLE:
+        return ""
+
+    processed = preprocess_image_for_ocr(image)
+    results = []
+
+    # Turli PSM rejimlari (matematik test uchun yaxshilari)
+    psm_modes = [6, 3, 4, 11]  # 6=block, 3=auto, 4=column, 11=sparse
+
+    for psm in psm_modes:
+        try:
+            text = pytesseract.image_to_string(
+                processed,
+                lang=lang,
+                config=f"--oem 3 --psm {psm}"
+            )
+            if text and text.strip():
+                results.append((len(text.strip()), text.strip()))
+        except Exception:
+            continue
+
+    if not results:
+        return ocr_image_tesseract(image, lang)
+
+    # Eng uzun natijani qaytarish (odatda eng to'liq)
+    results.sort(reverse=True)
+    return results[0][1]
+
+
+# ==========================================================================
+# FAYL O'QUVCHILARI
+# ==========================================================================
+
+def read_pdf_text(file_bytes: bytes) -> str:
+    """PDF dan matnni oddiy yo'l bilan ajratish."""
+    try:
+        reader = PdfReader(io.BytesIO(file_bytes))
+        text = ""
+        for page in reader.pages[:MAX_PDF_PAGES]:
+            try:
+                text += page.extract_text() + "\n\n"
+            except Exception:
+                continue
+        return text.strip()
+    except Exception as e:
+        return f"[PDF o'qish xatosi: {e}]"
+
+
+def read_pdf_with_ocr(file_bytes: bytes, status_placeholder=None) -> str:
+    """PDF ni rasm sifatida o'qib, har bir sahifaga OCR qilish."""
+    if not PDF2IMAGE_AVAILABLE or not TESSERACT_AVAILABLE:
+        return read_pdf_text(file_bytes)
+
+    try:
+        if status_placeholder:
+            status_placeholder.info("📄 PDF sahifalarini rasmga aylantirish...")
+
+        images = convert_from_bytes(file_bytes, dpi=250, fmt="png")
+        images = images[:MAX_PDF_PAGES]
+
+        all_text = []
+        for i, img in enumerate(images, 1):
+            if status_placeholder:
+                status_placeholder.info(f"🔍 OCR: sahifa {i}/{len(images)} (matematik formulalar bilan)...")
+            page_text = ocr_image_with_layout(img)
+            if page_text:
+                all_text.append(f"--- Sahifa {i} ---\n{page_text}")
+
+        return "\n\n".join(all_text)
+    except Exception as e:
+        if status_placeholder:
+            status_placeholder.warning(f"OCR xatosi, oddiy o'qishga o'tildi: {e}")
+        return read_pdf_text(file_bytes)
+
+
+def read_docx(file_bytes: bytes) -> str:
+    """DOCX dan matn va jadvallarni ajratib olish."""
+    try:
+        doc = Document(io.BytesIO(file_bytes))
+        parts = []
+        for para in doc.paragraphs:
+            if para.text.strip():
+                parts.append(para.text)
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = " | ".join(cell.text.strip() for cell in row.cells)
+                if row_text.strip():
+                    parts.append(row_text)
+        return "\n".join(parts)
+    except Exception as e:
+        return f"[DOCX xatosi: {e}]"
+
+
+def read_image(file_bytes: bytes, status_placeholder=None) -> str:
+    """Rasmdan OCR yordamida matn ajratish."""
+    try:
+        image = Image.open(io.BytesIO(file_bytes))
+
+        if status_placeholder:
+            status_placeholder.info("🔍 Rasmdan OCR qilinmoqda (matematik formulalar bilan)...")
+
+        if TESSERACT_AVAILABLE:
+            return ocr_image_with_layout(image)
+        else:
+            return "[Tesseract OCR o'rnatilmagan. Rasmni o'qish uchun tesseract kerak.]"
+    except Exception as e:
+        return f"[Rasm xatosi: {e}]"
+
+
+def read_text_file(file_bytes: bytes) -> str:
+    """TXT/MD/CSV fayllarini o'qish."""
+    for encoding in ("utf-8", "utf-8-sig", "cp1251", "latin-1"):
+        try:
+            return file_bytes.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return file_bytes.decode("utf-8", errors="ignore")
+
+
+def extract_file_content(file_data: dict, status_placeholder=None) -> Tuple[str, str]:
+    """
+    Fayl turi bo'yicha matnni ajratib olish.
+    Return: (extracted_text, method_used)
+    """
+    name = file_data["name"].lower()
+    file_bytes = file_data["bytes"]
+
+    if name.endswith(".pdf"):
+        # 1. Avval oddiy matn (tezroq)
+        text = read_pdf_text(file_bytes)
+        # Agar matn yetarli bo'lmasa (skanerlangan PDF) — OCR
+        if len(text.strip()) < 100 or text.startswith("[PDF"):
+            ocr_text = read_pdf_with_ocr(file_bytes, status_placeholder)
+            return ocr_text, "PDF + OCR (skanerlangan/matematik)"
+        # Aralash: agar matn bor bo'lsa-yu, lekin formulalar bo'lishi mumkin — OCR ham qo'shamiz
+        if any(kw in text.lower() for kw in ["формул", "rasm", "image", "figure"]) and PDF2IMAGE_AVAILABLE:
+            ocr_text = read_pdf_with_ocr(file_bytes, status_placeholder)
+            combined = f"=== Matn qatlami ===\n{text}\n\n=== OCR qatlami (formulalar) ===\n{ocr_text}"
+            return combined, "PDF (matn + OCR aralash)"
+        return text, "PDF (matn qatlami)"
+
+    elif name.endswith((".docx", ".doc")):
+        return read_docx(file_bytes), "Word hujjat"
+
+    elif name.endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff")):
+        return read_image(file_bytes, status_placeholder), "Rasm + OCR"
+
+    elif name.endswith((".txt", ".md", ".csv")):
+        return read_text_file(file_bytes), "Matn fayl"
+
+    else:
+        try:
+            return read_text_file(file_bytes), "Noma'lum (matn sifatida)"
+        except Exception as e:
+            return f"[Qo'llab-quvvatlanmaydigan fayl: {e}]", "Xato"
+
+
+# ==========================================================================
+# AI - SAVOLLARNI AJRATIB OLISH VA YECHISH
+# ==========================================================================
+
+EXTRACTION_SYSTEM_PROMPT = """Sen test fayllarini tahlil qiluvchi mutaxassis AI siz. Sening vazifang:
+
+1. Matndan har bir savolni aniq ajratib olish (raqami, matni, variantlari)
+2. Matematik formulalar, ifodalar, tenglamalarni to'g'ri talqin qilish
+3. Agar javoblar kalit (answer key) berilgan bo'lsa — uni ishlatish
+4. Agar javoblar berilmagan bo'lsa — O'ZING TO'G'RI JAVOBNI HISOBLAB CHIQARISH
+   (sen kuchli AI siz, har qanday matematika, fizika, kimyo, biologiya, tarix savolini yecha olasin)
+
+MUHIM QOIDALAR:
+- OCR natijasida matn buzilgan bo'lishi mumkin — kontekstdan tushunib, to'g'ri talqin qil
+- Matematik belgilar (², ³, √, ∫, π) noto'g'ri o'qilgan bo'lsa — formulani tikla
+- Faqat va faqat JSON formatda javob qaytar, boshqa hech narsa yozma
+- Variantlar formati: "A) javob matni", "B) ...", va h.k.
+- correct_answer da faqat harf bo'lishi kerak: "A", "B", "C", "D" yoki "E"
+- Agar variantlar yo'q bo'lsa, correct_answer da to'liq javob bo'ladi
+
+JSON struktura:
 {
-  "title": "test sarlavhasi",
+  "title": "Test sarlavhasi",
+  "subject": "Fan nomi (matematika, fizika...)",
   "questions": [
     {
       "number": 1,
-      "question": "savol matni",
+      "question": "Savol matni (formulalar bilan)",
       "options": ["A) ...", "B) ...", "C) ...", "D) ..."],
-      "correct_answer": "A",
-      "explanation": "qisqa tushuntirish"
+      "correct_answer": "B",
+      "explanation": "Qisqa yechim/tushuntirish"
     }
   ]
-}
-
-Muhim qoidalar:
-- Variantlari yo'q ochiq savollar uchun "options" ni bo'sh massiv [] qoldiring.
-- "correct_answer" har doim TO'LDIRILGAN bo'lishi kerak (variant harfi yoki javob matni).
-- Test sarlavhasi aniq bo'lmasa "Test" deb yozing.
-- Qaytariladigan JSON to'liq va to'g'ri sintaksisli bo'lishi kerak.
-"""
+}"""
 
 
-def build_user_message(payload: dict) -> list[dict]:
-    """Groq API uchun user message qismini quradi (matn va/yoki rasm)."""
-    content: list[dict] = []
-    text = payload.get("text", "").strip()
-    images: list[str] = payload.get("images", [])
-
-    if text:
-        # Juda uzun bo'lsa kesamiz (model context limitiga sig'sin)
-        if len(text) > 25_000:
-            text = text[:25_000] + "\n\n[... matn qisqartirildi ...]"
-        content.append({
-            "type": "text",
-            "text": (
-                "Quyidagi test matnini tahlil qiling va savollar/javoblarni "
-                "JSON ko'rinishda qaytaring:\n\n" + text
-            ),
-        })
-
-    for b64 in images[:4]:  # eng ko'pi 4 ta rasm
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/png;base64,{b64}"},
-        })
-
-    if not content:
-        content.append({
-            "type": "text",
-            "text": "Faylda hech qanday tahlil qilinadigan ma'lumot topilmadi.",
-        })
-
-    return content
-
-
-def extract_json_block(text: str) -> Optional[dict]:
-    """Modeldan kelgan matndan JSON blokni topib parse qiladi."""
-    if not text:
+def extract_questions_from_text(client: Groq, text: str, status_placeholder=None) -> Optional[Dict]:
+    """Matndan savollarni AI yordamida ajratib olish."""
+    if not text or len(text.strip()) < 20:
         return None
-    # ```json ... ``` ko'rinishidagi blok
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            pass
-    # Birinchi { dan oxirgi } gacha
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        candidate = text[start : end + 1]
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
+
+    # Juda uzun matn bo'lsa qisqartirish (Groq token limiti)
+    MAX_CHARS = 25000
+    if len(text) > MAX_CHARS:
+        text = text[:MAX_CHARS] + "\n\n[matn qisqartirildi]"
+
+    if status_placeholder:
+        status_placeholder.info("🧠 AI test savollarini tahlil qilmoqda...")
+
+    user_prompt = f"""Quyidagi test matnini tahlil qil va JSON formatida qaytar:
+
+{text}
+
+DIQQAT: Faqat JSON qaytar, hech qanday qo'shimcha matn yozma. Agar javoblar yo'q bo'lsa — har bir savolni o'zing yech va correct_answer ga to'g'ri harfni qo'y."""
+
+    try:
+        response = client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[
+                {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+            max_tokens=8000,
+            response_format={"type": "json_object"},
+        )
+        content = response.choices[0].message.content
+        data = json.loads(content)
+
+        # Validatsiya
+        if "questions" not in data or not isinstance(data["questions"], list):
             return None
-    return None
+        if len(data["questions"]) == 0:
+            return None
 
-
-def analyze_test_with_ai(payload: dict) -> dict:
-    """
-    Faylni Groq AI orqali tahlil qiladi.
-    Qaytaradi: {"title": str, "questions": [Question dict, ...]}
-    """
-    client = get_groq_client()
-    if client is None:
-        raise RuntimeError("Groq API kaliti sozlanmagan")
-
-    images = payload.get("images", [])
-    has_images = len(images) > 0
-
-    user_content = build_user_message(payload)
-
-    # Model tanlash: rasm bo'lsa vision, aks holda text
-    model = VISION_MODEL if has_images else TEXT_MODEL
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_content if has_images else user_content[0]["text"]},
-    ]
-
-    last_error: Optional[Exception] = None
-    for attempt_model in ([model] if not has_images else [model, FALLBACK_VISION_MODEL]):
-        try:
-            kwargs: dict = {
-                "model": attempt_model,
-                "messages": messages,
-                "temperature": 0.2,
-                "max_tokens": 6000,
+        # Har bir savolda zarur maydonlar borligini tekshirish
+        clean_questions = []
+        for i, q in enumerate(data["questions"], 1):
+            if not isinstance(q, dict):
+                continue
+            clean_q = {
+                "number": q.get("number", i),
+                "question": str(q.get("question", "")).strip(),
+                "options": q.get("options", []) if isinstance(q.get("options"), list) else [],
+                "correct_answer": str(q.get("correct_answer", "")).strip().upper()[:1] or "A",
+                "explanation": str(q.get("explanation", "")).strip(),
             }
-            # JSON rejimi (faqat text modellarda barqaror ishlaydi)
-            if not has_images:
-                kwargs["response_format"] = {"type": "json_object"}
+            if clean_q["question"]:
+                clean_questions.append(clean_q)
 
-            completion = client.chat.completions.create(**kwargs)
-            raw = completion.choices[0].message.content or ""
-            data = extract_json_block(raw) or json.loads(raw)
-            if not isinstance(data, dict):
-                raise ValueError("Model JSON obyekt qaytarmadi")
-            return data
-        except Exception as e:
-            last_error = e
-            continue
+        if not clean_questions:
+            return None
 
-    raise RuntimeError(f"AI tahlilida xatolik: {last_error}")
+        data["questions"] = clean_questions
+        if "title" not in data:
+            data["title"] = "Test"
+        return data
 
-
-# ============================================================================
-#                              TEST SAQLASH
-# ============================================================================
-
-def save_uploaded_test(file_bytes: bytes, file_name: str) -> TestFile:
-    """Yuklangan faylni diskka saqlaydi va metadata qaytaradi."""
-    test_id = uuid.uuid4().hex
-    suffix = Path(file_name).suffix.lower()
-    storage_path = TESTS_DIR / f"{test_id}{suffix}"
-    storage_path.write_bytes(file_bytes)
-    return TestFile(
-        id=test_id,
-        file_name=file_name,
-        size=len(file_bytes),
-        created_at=time.time(),
-        file_type=suffix.lstrip("."),
-        storage_path=str(storage_path),
-    )
+    except json.JSONDecodeError as e:
+        st.error(f"AI javobini JSON ga o'tkazib bo'lmadi: {e}")
+        return None
+    except Exception as e:
+        st.error(f"AI tahlil xatosi: {e}")
+        return None
 
 
-def delete_test_file(test: TestFile) -> None:
-    """Faylni diskdan o'chiradi."""
+def solve_single_question(client: Groq, question: Dict) -> str:
+    """Bitta savolni AI yordamida yechib, to'g'ri javobni qaytarish."""
+    options_text = "\n".join(question.get("options", []))
+    prompt = f"""Quyidagi savolni yech va faqat to'g'ri javob harfini qaytar (A, B, C, D yoki E):
+
+Savol: {question['question']}
+
+Variantlar:
+{options_text}
+
+Faqat bitta harf yoz, boshqa hech narsa yozma."""
+
     try:
-        Path(test.storage_path).unlink(missing_ok=True)
+        response = client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=10,
+        )
+        answer = response.choices[0].message.content.strip().upper()
+        # Faqat harfni ajratib olish
+        match = re.search(r"[A-E]", answer)
+        return match.group(0) if match else "A"
     except Exception:
-        pass
+        return "A"
 
 
-def load_test_bytes(test: TestFile) -> bytes:
-    """Saqlangan fayldan baytlarni o'qiydi."""
-    return Path(test.storage_path).read_bytes()
+def explain_question(client: Groq, question: Dict, user_answer: str) -> str:
+    """Savol yechimini batafsil tushuntirish."""
+    options_text = "\n".join(question.get("options", []))
+    prompt = f"""Savol: {question['question']}
 
+Variantlar:
+{options_text}
 
-# ============================================================================
-#                              NATIJALARNI SAQLASH
-# ============================================================================
+To'g'ri javob: {question['correct_answer']}
+Foydalanuvchi javobi: {user_answer or '(javob bermagan)'}
 
-def load_results() -> list[dict]:
-    if not RESULTS_FILE.exists():
-        return []
+Bu savolni qisqa va tushunarli qilib o'zbek tilida tushuntir. Yechim bosqichlarini ko'rsat."""
+
     try:
-        return json.loads(RESULTS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+        response = client.chat.completions.create(
+            model=FAST_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=400,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Tushuntirish olinmadi: {e}"
 
 
-def save_result(result: TestResult) -> None:
-    results = load_results()
-    results.insert(0, result.to_dict())
-    results = results[:50]  # so'nggi 50 ta natija
-    RESULTS_FILE.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+# ==========================================================================
+# SIDEBAR
+# ==========================================================================
 
-
-# ============================================================================
-#                              JAVOB TEKSHIRISH
-# ============================================================================
-
-def normalize_answer(answer: str) -> str:
-    """Javobni solishtirish uchun normalizatsiya qiladi."""
-    if not answer:
-        return ""
-    s = answer.strip().lower()
-    # "A)", "A.", "A " → "a"
-    s = re.sub(r"^([a-eа-е])[\)\.\s]", r"\1", s)
-    return s
-
-
-def is_answer_correct(user: str, correct: str) -> bool:
-    """Foydalanuvchi javobi to'g'rimi tekshiradi."""
-    u = normalize_answer(user)
-    c = normalize_answer(correct)
-    if not u or not c:
-        return False
-    if u == c:
-        return True
-    # Variant harfi bo'yicha solishtirish
-    if u[0] == c[0] and u[0] in "abcdeабсде":
-        return True
-    # Birining ichida ikkinchisi
-    if u in c or c in u:
-        return True
-    return False
-
-
-# ============================================================================
-#                              SESSIYA HOLATI
-# ============================================================================
-
-def init_session_state() -> None:
-    """Streamlit sessiya o'zgaruvchilarini ishga tushiradi."""
-    defaults: dict[str, Any] = {
-        "first_name": "",
-        "last_name": "",
-        "duration_min": 30,
-        "tests": [],                # list[TestFile]
-        "active_test_id": None,
-        "view": "home",             # "home" | "test" | "result"
-        "current_test": None,       # dict: {"title", "questions": [Question]}
-        "answers": {},              # {q_number: str}
-        "current_index": 0,
-        "test_started_at": None,    # epoch seconds
-        "test_duration_sec": 0,
-        "last_result": None,        # TestResult dict
-        "groq_api_key": "",
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-
-# ============================================================================
-#                              UI: STIL
-# ============================================================================
-
-CUSTOM_CSS = """
-<style>
-    /* Asosiy fon va shrift */
-    .stApp {
-        background: radial-gradient(ellipse at top, #1a1a2e 0%, #0f0f1a 60%);
-    }
-    /* Sarlavhalar */
-    h1, h2, h3 {
-        font-family: 'Helvetica Neue', sans-serif;
-        letter-spacing: -0.02em;
-    }
-    /* Gradient matn */
-    .gradient-text {
-        background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        font-weight: 800;
-    }
-    /* Karta */
-    .olimp-card {
-        background: rgba(30, 30, 50, 0.6);
-        border: 1px solid rgba(251, 191, 36, 0.2);
-        border-radius: 14px;
-        padding: 20px;
-        backdrop-filter: blur(10px);
-    }
-    /* Taymer */
-    .timer-box {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        padding: 10px 18px;
-        border-radius: 12px;
-        font-family: 'Courier New', monospace;
-        font-weight: 700;
-        font-size: 1.2rem;
-        background: rgba(251, 191, 36, 0.1);
-        border: 1px solid rgba(251, 191, 36, 0.4);
-        color: #fbbf24;
-    }
-    .timer-warn {
-        background: rgba(239, 68, 68, 0.15);
-        border-color: rgba(239, 68, 68, 0.6);
-        color: #f87171;
-        animation: pulse 1s infinite;
-    }
-    @keyframes pulse {
-        0%, 100% { box-shadow: 0 0 10px rgba(239,68,68,0.3); }
-        50% { box-shadow: 0 0 30px rgba(239,68,68,0.7); }
-    }
-    /* Natija raqamlari */
-    .result-number {
-        font-size: 2.5rem;
-        font-weight: 800;
-        text-align: center;
-    }
-    .result-correct { color: #4ade80; }
-    .result-wrong { color: #f87171; }
-    .result-percent {
-        background: linear-gradient(135deg, #fbbf24, #f59e0b);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-    }
-    /* Tugmalar */
-    .stButton > button {
-        border-radius: 10px;
-        font-weight: 600;
-    }
-</style>
-"""
-
-
-# ============================================================================
-#                              UI: SIDEBAR
-# ============================================================================
-
-def render_sidebar() -> None:
-    """Chap paneldagi sozlamalar va fayllar ro'yxati."""
+def render_sidebar():
     with st.sidebar:
-        st.markdown(f"## {APP_ICON} OlimpTest")
-        st.caption(APP_TAGLINE)
+        st.markdown("### 🏆 OlimpTest")
+        st.caption("Olimpiada mashq platformasi")
         st.divider()
 
-        # API kalit (agar .env da yo'q bo'lsa)
-        secrets_has_key = False
-        try:
-            secrets_has_key = bool(st.secrets.get("GROQ_API_KEY", ""))
-        except Exception:
-            pass
-        if not (os.getenv("GROQ_API_KEY") or secrets_has_key):
-            with st.expander("🔑 Groq API kalit", expanded=not bool(st.session_state.groq_api_key)):
-                key = st.text_input(
-                    "API kalit",
+        # API Key holati
+        client = get_groq_client()
+        if client:
+            st.success("✅ AI ulangan")
+        else:
+            st.warning("⚠️ Groq API kalit kerak")
+            with st.expander("🔑 API kalit kiritish"):
+                manual_key = st.text_input(
+                    "Groq API Key",
                     type="password",
-                    value=st.session_state.groq_api_key,
-                    help="https://console.groq.com/keys dan oling",
+                    key="manual_api_key_input",
+                    help="https://console.groq.com/keys dan oling"
                 )
-                if key != st.session_state.groq_api_key:
-                    st.session_state.groq_api_key = key
-                st.caption("⚠️ Kalitni hech kimga yubormang")
+                if manual_key:
+                    st.session_state["manual_api_key"] = manual_key
+                    st.rerun()
+
+        # OCR holati
+        if TESSERACT_AVAILABLE:
+            st.success("✅ OCR (Tesseract) faol")
+        else:
+            st.error("❌ Tesseract OCR yo'q")
+
         st.divider()
 
         # Foydalanuvchi
-        st.markdown("### 👤 Foydalanuvchi")
+        st.markdown("#### 👤 Foydalanuvchi")
         st.session_state.first_name = st.text_input(
             "Ism", value=st.session_state.first_name, placeholder="Ali"
         )
         st.session_state.last_name = st.text_input(
-            "Familya", value=st.session_state.last_name, placeholder="Valiyev"
+            "Familiya", value=st.session_state.last_name, placeholder="Valiyev"
         )
+
         st.session_state.duration_min = st.number_input(
-            "⏱ Vaqt (daqiqa)",
+            "⏱️ Test vaqti (daqiqa)",
             min_value=1, max_value=300,
-            value=int(st.session_state.duration_min),
-            step=1,
+            value=st.session_state.duration_min,
         )
+
         st.divider()
 
-        # Test fayllari
-        st.markdown("### 📁 Test fayllari")
+        # Fayl yuklash
+        st.markdown("#### 📁 Test fayllari")
+
         uploaded = st.file_uploader(
-            "Fayl yuklash",
-            type=SUPPORTED_EXTENSIONS,
+            "Fayl yuklang",
+            type=["pdf", "docx", "doc", "txt", "md", "csv", "png", "jpg", "jpeg", "webp", "bmp", "tiff"],
             accept_multiple_files=False,
-            key="file_uploader",
+            help=f"Maks: {MAX_FILE_SIZE_MB}MB. Matematik formulalar va rasmlar OCR bilan o'qiladi.",
         )
+
         if uploaded is not None:
-            existing_names = {t.file_name for t in st.session_state.tests}
-            if uploaded.name not in existing_names:
-                file_bytes = uploaded.getvalue()
-                test = save_uploaded_test(file_bytes, uploaded.name)
-                st.session_state.tests.append(test)
-                st.session_state.active_test_id = test.id
-                st.success(f"✅ {uploaded.name} yuklandi")
+            file_bytes = uploaded.read()
+            file_size_mb = len(file_bytes) / (1024 * 1024)
 
-        # Yuklangan fayllar ro'yxati
-        if not st.session_state.tests:
-            st.caption("Hali test yuklanmagan")
-        else:
-            for test in st.session_state.tests:
-                is_active = (test.id == st.session_state.active_test_id)
-                col1, col2 = st.columns([5, 1])
-                with col1:
-                    label = ("✅ " if is_active else "📄 ") + test.file_name
-                    if st.button(
-                        label,
-                        key=f"select_{test.id}",
-                        use_container_width=True,
-                        type="primary" if is_active else "secondary",
-                    ):
-                        st.session_state.active_test_id = test.id
-                        st.rerun()
-                with col2:
-                    if st.button("🗑", key=f"del_{test.id}", help="O'chirish"):
-                        delete_test_file(test)
-                        st.session_state.tests = [
-                            t for t in st.session_state.tests if t.id != test.id
-                        ]
-                        if st.session_state.active_test_id == test.id:
-                            st.session_state.active_test_id = None
-                        st.rerun()
-                st.caption(f"  {test.size / 1024:.1f} KB · {test.file_type.upper()}")
-
-
-# ============================================================================
-#                              UI: BOSH SAHIFA
-# ============================================================================
-
-def render_home() -> None:
-    """Bosh sahifa — testni boshlash ekranı."""
-    st.markdown(
-        f"""
-        <div style="text-align:center; padding:30px 0 20px;">
-            <div style="display:inline-block; padding:6px 14px; border-radius:999px;
-                        background:rgba(251,191,36,0.1); border:1px solid rgba(251,191,36,0.3);
-                        color:#fbbf24; font-size:0.85rem; margin-bottom:16px;">
-                ✨ Groq AI quvvatida
-            </div>
-            <h1 style="font-size:3rem; margin:0;">
-                <span class="gradient-text">OlimpTest</span>
-            </h1>
-            <p style="color:#9ca3af; max-width:600px; margin:12px auto;">
-                {APP_TAGLINE}. Har qanday test faylini yuklang —
-                javobi yo'q bo'lsa AI o'zi yechib beradi.
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # Xususiyatlar
-    cols = st.columns(3)
-    features = [
-        ("📄", "Har qanday format", "PDF, Word, rasm, matn — barchasi"),
-        ("🧠", "AI tahlili", "Groq LLaMA savollarni ajratadi va javob topadi"),
-        ("⏱", "Vaqtli mashq", "Belgilangan vaqt ichida tezligingizni oshiring"),
-    ]
-    for col, (icon, title, desc) in zip(cols, features):
-        with col:
-            st.markdown(
-                f"""
-                <div class="olimp-card" style="text-align:center; height:160px;">
-                    <div style="font-size:2rem;">{icon}</div>
-                    <div style="font-weight:700; margin:8px 0;">{title}</div>
-                    <div style="color:#9ca3af; font-size:0.85rem;">{desc}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-    st.write("")
-
-    # Tayyorlik holati
-    has_user = bool(st.session_state.first_name.strip() and st.session_state.last_name.strip())
-    has_test = st.session_state.active_test_id is not None
-    secrets_key = ""
-    try:
-        secrets_key = st.secrets.get("GROQ_API_KEY", "")
-    except Exception:
-        pass
-    has_key = bool(secrets_key or os.getenv("GROQ_API_KEY") or st.session_state.groq_api_key)
-
-    if not has_key:
-        st.warning("🔑 Avval chap paneldan Groq API kalitini kiriting")
-    elif not has_user:
-        st.info("1️⃣ Chap paneldan ism va familyangizni kiriting")
-    elif not has_test:
-        st.info("2️⃣ Chap paneldan test faylini yuklang va tanlang")
-    else:
-        st.success("3️⃣ Hammasi tayyor — testni boshlashingiz mumkin")
-
-    st.write("")
-
-    # Boshlash tugmasi
-    col_l, col_c, col_r = st.columns([1, 2, 1])
-    with col_c:
-        start_disabled = not (has_user and has_test and has_key)
-        if st.button(
-            "🚀 Testni boshlash",
-            disabled=start_disabled,
-            use_container_width=True,
-            type="primary",
-        ):
-            start_test()
-
-    # Oldingi natijalar
-    results = load_results()
-    if results:
-        st.divider()
-        st.markdown("### 📊 So'nggi natijalar")
-        for r in results[:5]:
-            with st.container():
-                c1, c2, c3, c4 = st.columns([3, 2, 1, 1])
-                with c1:
-                    st.write(f"**{r['student_name']}** · {r['test_title']}")
-                    finished = datetime.fromtimestamp(r["finished_at"])
-                    st.caption(finished.strftime("%Y-%m-%d %H:%M"))
-                with c2:
-                    st.write(f"{r['correct']}/{r['total_questions']} to'g'ri")
-                with c3:
-                    st.metric("", f"{r['percent']:.0f}%")
-                with c4:
-                    mins = r["duration_used_sec"] // 60
-                    secs = r["duration_used_sec"] % 60
-                    st.caption(f"⏱ {mins}:{secs:02d}")
-
-
-# ============================================================================
-#                              TESTNI BOSHLASH
-# ============================================================================
-
-def start_test() -> None:
-    """Tanlangan faylni AI bilan tahlil qilib, test rejimiga o'tadi."""
-    test = next(
-        (t for t in st.session_state.tests if t.id == st.session_state.active_test_id),
-        None,
-    )
-    if test is None:
-        st.error("Test fayli topilmadi")
-        return
-
-    with st.spinner("🤖 AI fayldan savollarni o'qimoqda..."):
-        try:
-            file_bytes = load_test_bytes(test)
-            payload = read_file_payload(file_bytes, test.file_name)
-
-            if not payload.get("text") and not payload.get("images"):
-                st.error("Fayldan ma'lumot olib bo'lmadi")
-                return
-
-            data = analyze_test_with_ai(payload)
-            raw_questions = data.get("questions", [])
-            if not raw_questions:
-                st.error("Faylda savollar topilmadi")
-                return
-
-            questions = [Question.from_dict(q) for q in raw_questions]
-            st.session_state.current_test = {
-                "title": data.get("title", test.file_name),
-                "file_name": test.file_name,
-                "questions": [q.to_dict() for q in questions],
-            }
-            st.session_state.answers = {}
-            st.session_state.current_index = 0
-            st.session_state.test_started_at = time.time()
-            st.session_state.test_duration_sec = int(st.session_state.duration_min) * 60
-            st.session_state.view = "test"
-            st.success(f"✅ {len(questions)} ta savol topildi. Test boshlanmoqda...")
-            time.sleep(0.6)
-            st.rerun()
-        except Exception as e:
-            st.error(f"Xato: {e}")
-
-
-# ============================================================================
-#                              UI: TEST EKRANI
-# ============================================================================
-
-def render_test() -> None:
-    """Test boshqaruv ekrani."""
-    test = st.session_state.current_test
-    if not test:
-        st.session_state.view = "home"
-        st.rerun()
-        return
-
-    questions = [Question.from_dict(q) for q in test["questions"]]
-    total = len(questions)
-    idx = st.session_state.current_index
-    current = questions[idx]
-
-    # Vaqt hisoblash
-    elapsed = int(time.time() - st.session_state.test_started_at)
-    remaining = max(0, st.session_state.test_duration_sec - elapsed)
-
-    # Vaqt tugagan bo'lsa avtomatik yakunlash
-    if remaining == 0:
-        finish_test(forced=True)
-        return
-
-    # Sarlavha + taymer
-    col_t, col_timer = st.columns([3, 1])
-    with col_t:
-        st.markdown(f"### {test['title']}")
-        st.caption(f"👤 {st.session_state.first_name} {st.session_state.last_name}")
-    with col_timer:
-        mm, ss = divmod(remaining, 60)
-        warn_class = "timer-warn" if remaining < 60 else ""
-        st.markdown(
-            f"<div class='timer-box {warn_class}'>⏱ {mm:02d}:{ss:02d}</div>",
-            unsafe_allow_html=True,
-        )
-
-    # Progress bar
-    progress = (idx + 1) / total
-    st.progress(progress, text=f"Savol {idx + 1} / {total}")
-
-    # Savol kartasi
-    st.markdown("<div class='olimp-card'>", unsafe_allow_html=True)
-    st.markdown(f"#### {current.number}. {current.question}")
-
-    answer_key = f"q_{current.number}"
-    current_answer = st.session_state.answers.get(current.number, "")
-
-    if current.options:
-        # Variantli savol
-        labels: list[str] = []
-        for i, opt in enumerate(current.options):
-            letter_match = re.match(r"^\s*([A-EA-Eа-е])[\)\.]", opt)
-            letter = letter_match.group(1).upper() if letter_match else chr(65 + i)
-            labels.append(f"{letter}) {re.sub(r'^[A-Ea-eА-Еа-е][).]\\s*', '', opt)}")
-
-        # Joriy javobning indeksi
-        try:
-            current_letter = (current_answer[0].upper() if current_answer else "")
-            default_idx = next(
-                (i for i, l in enumerate(labels) if l.startswith(current_letter + ")")),
-                None,
-            )
-        except Exception:
-            default_idx = None
-
-        choice = st.radio(
-            "Javobingizni tanlang:",
-            options=labels,
-            index=default_idx if default_idx is not None else None,
-            key=answer_key,
-            label_visibility="collapsed",
-        )
-        if choice:
-            letter = choice.split(")", 1)[0].strip()
-            st.session_state.answers[current.number] = letter
-    else:
-        # Ochiq savol
-        text_answer = st.text_input(
-            "Javobingizni kiriting:",
-            value=current_answer,
-            key=answer_key,
-        )
-        if text_answer != current_answer:
-            st.session_state.answers[current.number] = text_answer
-
-    st.markdown("</div>", unsafe_allow_html=True)
-    st.write("")
-
-    # Navigatsiya
-    nav_cols = st.columns([1, 1, 1])
-    with nav_cols[0]:
-        if st.button("⬅ Oldingi", disabled=(idx == 0), use_container_width=True):
-            st.session_state.current_index = max(0, idx - 1)
-            st.rerun()
-    with nav_cols[1]:
-        if st.button("🏁 Yakunlash", use_container_width=True, type="primary"):
-            finish_test(forced=False)
-            return
-    with nav_cols[2]:
-        if st.button("Keyingi ➡", disabled=(idx >= total - 1), use_container_width=True):
-            st.session_state.current_index = min(total - 1, idx + 1)
-            st.rerun()
-
-    # Savollar paneli
-    st.write("")
-    st.caption("Savollarga o'tish:")
-    cols_per_row = 10
-    rows = (total + cols_per_row - 1) // cols_per_row
-    for r in range(rows):
-        row_cols = st.columns(cols_per_row)
-        for c in range(cols_per_row):
-            qi = r * cols_per_row + c
-            if qi >= total:
-                break
-            q = questions[qi]
-            answered = q.number in st.session_state.answers and st.session_state.answers[q.number]
-            is_current = (qi == idx)
-            label = f"{q.number}"
-            btn_type = "primary" if is_current else ("secondary" if answered else "secondary")
-            with row_cols[c]:
-                if st.button(label, key=f"jump_{qi}", use_container_width=True, type=btn_type):
-                    st.session_state.current_index = qi
+            if file_size_mb > MAX_FILE_SIZE_MB:
+                st.error(f"Fayl juda katta: {file_size_mb:.1f}MB")
+            else:
+                file_hash = hashlib.md5(file_bytes).hexdigest()
+                existing_hashes = [f.get("hash") for f in st.session_state.uploaded_files]
+                if file_hash not in existing_hashes:
+                    st.session_state.uploaded_files.append({
+                        "name": uploaded.name,
+                        "bytes": file_bytes,
+                        "size": len(file_bytes),
+                        "hash": file_hash,
+                        "uploaded_at": datetime.now().isoformat(),
+                    })
+                    st.success(f"✅ {uploaded.name} yuklandi")
                     st.rerun()
 
-    # Avtomatik yangilanish (taymer uchun) — har 1 sekundda
-    if remaining > 0:
-        # Streamlit'da aniq timer yo'q; sahifani qayta yuklash uchun rerun ishlatamiz
-        time.sleep(1)
+        # Yuklangan fayllar ro'yxati
+        if st.session_state.uploaded_files:
+            st.markdown("**Yuklangan fayllar:**")
+            for idx, f in enumerate(st.session_state.uploaded_files):
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    is_active = st.session_state.active_file_idx == idx
+                    label = f"{'🟢' if is_active else '📄'} {f['name'][:25]}"
+                    if st.button(label, key=f"file_{idx}", use_container_width=True):
+                        st.session_state.active_file_idx = idx
+                        st.session_state.extracted_questions = None
+                        st.rerun()
+                with col2:
+                    if st.button("🗑", key=f"del_{idx}"):
+                        st.session_state.uploaded_files.pop(idx)
+                        if st.session_state.active_file_idx == idx:
+                            st.session_state.active_file_idx = None
+                        st.rerun()
+
+        st.divider()
+
+        # Test boshlash tugmasi
+        can_start = (
+            st.session_state.first_name and
+            st.session_state.last_name and
+            st.session_state.active_file_idx is not None and
+            client is not None and
+            not st.session_state.test_started
+        )
+
+        if st.session_state.test_started and not st.session_state.test_finished:
+            if st.button("⛔ Testni to'xtatish", use_container_width=True, type="secondary"):
+                st.session_state.test_finished = True
+                st.rerun()
+        else:
+            if st.button(
+                "🚀 Testni boshlash",
+                use_container_width=True,
+                disabled=not can_start,
+                type="primary",
+            ):
+                start_test()
+
+
+# ==========================================================================
+# TEST BOSHLASH
+# ==========================================================================
+
+def start_test():
+    """Test boshlash: faylni o'qish, AI tahlil, savollar tayyorlash."""
+    client = get_groq_client()
+    if not client:
+        st.error("Groq API kalit yo'q")
+        return
+
+    file_data = st.session_state.uploaded_files[st.session_state.active_file_idx]
+
+    with st.spinner("Fayl tahlil qilinmoqda..."):
+        status = st.empty()
+
+        # 1-bosqich: Fayldan matn ajratib olish
+        status.info("📖 Fayl o'qilmoqda...")
+        text, method = extract_file_content(file_data, status)
+
+        if not text or len(text.strip()) < 20:
+            status.error("Fayldan matn ajratib bo'lmadi. Boshqa fayl yuklang.")
+            return
+
+        st.markdown(f'<div class="ocr-info">📋 O\'qish usuli: <b>{method}</b> · {len(text)} ta belgi</div>',
+                    unsafe_allow_html=True)
+
+        # 2-bosqich: AI bilan savollarni ajratib olish
+        result = extract_questions_from_text(client, text, status)
+
+        if not result or not result.get("questions"):
+            status.error("AI savollarni ajratib ololmadi. Fayl formati noto'g'ri bo'lishi mumkin.")
+            return
+
+        # 3-bosqich: Javoblari yo'q savollarni AI bilan yechish
+        questions = result["questions"]
+        unanswered = [q for q in questions if not q.get("correct_answer") or q["correct_answer"] not in "ABCDE"]
+
+        if unanswered:
+            status.info(f"🧠 AI {len(unanswered)} ta savolni yechmoqda...")
+            for q in unanswered:
+                if q.get("options"):
+                    q["correct_answer"] = solve_single_question(client, q)
+
+        st.session_state.extracted_questions = result
+        st.session_state.test_started = True
+        st.session_state.test_finished = False
+        st.session_state.test_start_time = time.time()
+        st.session_state.user_answers = {}
+        st.session_state.current_question_idx = 0
+        status.empty()
         st.rerun()
 
 
-def finish_test(forced: bool = False) -> None:
-    """Testni yakunlaydi va natijalarni saqlaydi."""
-    test = st.session_state.current_test
-    if not test:
-        return
+# ==========================================================================
+# TEST INTERFEYSI
+# ==========================================================================
 
-    questions = [Question.from_dict(q) for q in test["questions"]]
-    answers = st.session_state.answers
+def render_test():
+    questions = st.session_state.extracted_questions["questions"]
+    title = st.session_state.extracted_questions.get("title", "Test")
     total = len(questions)
-    correct = 0
-    wrong = 0
-    skipped = 0
-    for q in questions:
-        ua = answers.get(q.number, "")
-        if not ua:
-            skipped += 1
-        elif is_answer_correct(ua, q.correct_answer):
-            correct += 1
-        else:
-            wrong += 1
-    answered = total - skipped
-    percent = (correct / total * 100) if total else 0.0
 
-    elapsed = int(time.time() - st.session_state.test_started_at)
-    duration_used = min(elapsed, st.session_state.test_duration_sec)
+    elapsed = time.time() - st.session_state.test_start_time
+    remaining = max(0, st.session_state.duration_min * 60 - elapsed)
 
-    result = TestResult(
-        id=uuid.uuid4().hex,
-        student_name=f"{st.session_state.first_name} {st.session_state.last_name}".strip(),
-        test_title=test.get("title", "Test"),
-        file_name=test.get("file_name", ""),
-        total_questions=total,
-        correct=correct,
-        wrong=wrong,
-        skipped=skipped,
-        percent=percent,
-        duration_used_sec=duration_used,
-        duration_total_sec=st.session_state.test_duration_sec,
-        finished_at=time.time(),
-        questions=test["questions"],
-        answers={str(k): v for k, v in answers.items()},
-    )
-    save_result(result)
-    st.session_state.last_result = result.to_dict()
-    st.session_state.view = "result"
-    if forced:
-        st.warning("⏰ Vaqt tugadi — test avtomatik yakunlandi")
+    if remaining <= 0:
+        st.session_state.test_finished = True
+        st.rerun()
+
+    mins = int(remaining // 60)
+    secs = int(remaining % 60)
+    timer_class = "timer-box timer-warning" if remaining < 60 else "timer-box"
+
+    # Header
+    col1, col2, col3 = st.columns([3, 2, 2])
+    with col1:
+        st.markdown(f"### 📝 {title}")
+        st.caption(f"{st.session_state.first_name} {st.session_state.last_name}")
+    with col2:
+        st.markdown(f'<div class="{timer_class}">⏱️ {mins:02d}:{secs:02d}</div>',
+                    unsafe_allow_html=True)
+    with col3:
+        answered = len(st.session_state.user_answers)
+        st.metric("Javob berilgan", f"{answered} / {total}")
+
+    progress = (st.session_state.current_question_idx + 1) / total
+    st.progress(progress)
+
+    # Joriy savol
+    idx = st.session_state.current_question_idx
+    q = questions[idx]
+
+    st.markdown(f"#### Savol {idx + 1} / {total}")
+    st.markdown(f'<div class="question-card">{q["number"]}. {q["question"]}</div>',
+                unsafe_allow_html=True)
+
+    # Variantlar
+    if q.get("options"):
+        current_ans = st.session_state.user_answers.get(q["number"], "")
+        option_letters = [opt[:1] for opt in q["options"] if opt]
+
+        # Default index
+        default_idx = 0
+        if current_ans:
+            for i, opt in enumerate(q["options"]):
+                if opt.startswith(current_ans):
+                    default_idx = i
+                    break
+
+        chosen = st.radio(
+            "Javobingiz:",
+            options=q["options"],
+            index=default_idx if current_ans else None,
+            key=f"q_{q['number']}",
+        )
+        if chosen:
+            letter = chosen[:1].upper()
+            st.session_state.user_answers[q["number"]] = letter
+    else:
+        text_ans = st.text_input(
+            "Javobingiz:",
+            value=st.session_state.user_answers.get(q["number"], ""),
+            key=f"qt_{q['number']}",
+        )
+        if text_ans:
+            st.session_state.user_answers[q["number"]] = text_ans
+
+    # Navigatsiya
+    st.divider()
+    nav_cols = st.columns([1, 1, 4, 1, 1])
+    with nav_cols[0]:
+        if st.button("⬅️", disabled=(idx == 0)):
+            st.session_state.current_question_idx -= 1
+            st.rerun()
+    with nav_cols[1]:
+        if st.button("➡️", disabled=(idx == total - 1)):
+            st.session_state.current_question_idx += 1
+            st.rerun()
+    with nav_cols[3]:
+        if st.button("✅ Yakunlash", type="primary"):
+            st.session_state.test_finished = True
+            st.rerun()
+
+    # Savol raqamlariga o'tish
+    st.markdown("**Savollar:**")
+    cols = st.columns(min(10, total))
+    for i, qq in enumerate(questions):
+        col = cols[i % len(cols)]
+        with col:
+            answered = qq["number"] in st.session_state.user_answers
+            label = f"{'✓' if answered else ''}{qq['number']}"
+            btn_type = "primary" if i == idx else "secondary"
+            if st.button(label, key=f"nav_{i}", type=btn_type, use_container_width=True):
+                st.session_state.current_question_idx = i
+                st.rerun()
+
+    # Auto-refresh timer
+    time.sleep(1)
     st.rerun()
 
 
-# ============================================================================
-#                              UI: NATIJA EKRANI
-# ============================================================================
+# ==========================================================================
+# NATIJA
+# ==========================================================================
 
-def render_result() -> None:
-    """Test yakunidan keyingi natija ekrani."""
-    result = st.session_state.last_result
-    if not result:
-        st.session_state.view = "home"
-        st.rerun()
-        return
+def render_results():
+    questions = st.session_state.extracted_questions["questions"]
+    title = st.session_state.extracted_questions.get("title", "Test")
+    answers = st.session_state.user_answers
 
-    st.markdown(
-        f"""
-        <div style="text-align:center; padding:20px 0;">
-            <div style="font-size:3rem;">🏆</div>
-            <h2 style="margin:10px 0;">Test yakunlandi</h2>
-            <p style="color:#9ca3af;">
-                {result['student_name']} · {result['test_title']}
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    correct = 0
+    wrong = 0
+    unanswered = 0
+    details = []
 
-    # Statistika kartalari
+    for q in questions:
+        user_ans = answers.get(q["number"], "").strip().upper()
+        correct_ans = q["correct_answer"].strip().upper()
+        if not user_ans:
+            unanswered += 1
+            status = "unanswered"
+        elif user_ans[:1] == correct_ans[:1]:
+            correct += 1
+            status = "correct"
+        else:
+            wrong += 1
+            status = "wrong"
+        details.append({"q": q, "user": user_ans, "status": status})
+
+    total = len(questions)
+    percent = round((correct / total) * 100) if total else 0
+
+    elapsed = int(time.time() - st.session_state.test_start_time)
+    elapsed_min = elapsed // 60
+    elapsed_sec = elapsed % 60
+
+    # Sarlavha
+    st.markdown('<h1 class="main-title">🏆 Test Yakunlandi</h1>', unsafe_allow_html=True)
+    st.markdown(f'<p class="subtitle">{st.session_state.first_name} {st.session_state.last_name} · {title}</p>',
+                unsafe_allow_html=True)
+
+    # Statistika
     cols = st.columns(4)
     stats = [
-        ("✅ To'g'ri", result["correct"], "result-correct"),
-        ("❌ Noto'g'ri", result["wrong"], "result-wrong"),
-        ("⏭ O'tkazilgan", result["skipped"], ""),
-        (f"{result['percent']:.0f}%", "Natija", "result-percent"),
+        ("To'g'ri", correct, "#22c55e"),
+        ("Noto'g'ri", wrong, "#ef4444"),
+        ("Javobsiz", unanswered, "#94a3b8"),
+        ("Natija", f"{percent}%", "#fbbf24"),
     ]
-    for col, (label, value, cls) in zip(cols, stats):
+    for col, (label, value, color) in zip(cols, stats):
         with col:
-            if isinstance(value, int):
-                st.markdown(
-                    f"""
-                    <div class="olimp-card" style="text-align:center;">
-                        <div class="result-number {cls}">{value}</div>
-                        <div style="color:#9ca3af; font-size:0.85rem;">{label}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    f"""
-                    <div class="olimp-card" style="text-align:center;">
-                        <div class="result-number {cls}">{label}</div>
-                        <div style="color:#9ca3af; font-size:0.85rem;">{value}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+            st.markdown(f'''
+                <div class="stat-card">
+                    <p class="stat-value" style="color: {color}">{value}</p>
+                    <p class="stat-label">{label}</p>
+                </div>
+            ''', unsafe_allow_html=True)
 
-    # Vaqt ma'lumoti
-    used = result["duration_used_sec"]
-    total = result["duration_total_sec"]
-    st.write("")
-    st.caption(
-        f"⏱ Sarflangan vaqt: {used // 60} daqiqa {used % 60} soniya "
-        f"(berilgan: {total // 60} daqiqa)"
-    )
-
+    st.markdown(f"⏱️ Sarflangan vaqt: **{elapsed_min}:{elapsed_sec:02d}**")
     st.divider()
 
-    # Har bir savol bo'yicha tahlil
-    st.markdown("### 📝 Savollar bo'yicha tahlil")
-    for q_dict in result["questions"]:
-        q = Question.from_dict(q_dict)
-        ua = result["answers"].get(str(q.number), "")
-        ok = ua and is_answer_correct(ua, q.correct_answer)
+    # Tafsilotlar
+    st.markdown("### 📋 Savol-javoblar")
 
-        if not ua:
-            border_color = "#6b7280"
-            icon = "⏭"
-            status = "Javob berilmagan"
-        elif ok:
-            border_color = "#4ade80"
+    for d in details:
+        q = d["q"]
+        status = d["status"]
+        user_ans = d["user"] or "—"
+
+        if status == "correct":
+            css_class = "correct-answer"
             icon = "✅"
-            status = "To'g'ri"
-        else:
-            border_color = "#f87171"
+        elif status == "wrong":
+            css_class = "wrong-answer"
             icon = "❌"
-            status = "Noto'g'ri"
+        else:
+            css_class = "wrong-answer"
+            icon = "⚪"
 
-        with st.expander(f"{icon} {q.number}. {q.question[:80]}{'...' if len(q.question) > 80 else ''}"):
-            st.markdown(
-                f"<div style='border-left:3px solid {border_color}; padding-left:12px;'>",
-                unsafe_allow_html=True,
-            )
-            st.markdown(f"**Savol:** {q.question}")
-            if q.options:
-                st.markdown("**Variantlar:**")
-                for opt in q.options:
+        with st.expander(f"{icon} Savol {q['number']}"):
+            st.markdown(f"**{q['question']}**")
+            if q.get("options"):
+                for opt in q["options"]:
                     st.markdown(f"- {opt}")
-            st.markdown(f"**Sizning javobingiz:** `{ua or '—'}`")
-            st.markdown(f"**To'g'ri javob:** `{q.correct_answer}`")
-            if q.explanation:
-                st.markdown(f"**Tushuntirish:** _{q.explanation}_")
-            st.markdown(f"**Holat:** {status}")
-            st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown(f'<div class="{css_class}">'
+                        f'Sizning javob: <b>{user_ans}</b> · '
+                        f'To\'g\'ri javob: <b>{q["correct_answer"]}</b>'
+                        f'</div>', unsafe_allow_html=True)
+            if q.get("explanation"):
+                st.info(f"💡 {q['explanation']}")
 
     st.divider()
 
-    # Harakat tugmalari
+    # Eksport va qayta boshlash
     col1, col2, col3 = st.columns(3)
     with col1:
-        if st.button("🔁 Yangi test", use_container_width=True, type="primary"):
-            st.session_state.view = "home"
-            st.session_state.current_test = None
-            st.session_state.last_result = None
-            st.rerun()
-    with col2:
-        # Natijani JSON sifatida yuklab olish
+        export_data = {
+            "user": f"{st.session_state.first_name} {st.session_state.last_name}",
+            "test": title,
+            "date": datetime.now().isoformat(),
+            "duration_seconds": elapsed,
+            "score": {"correct": correct, "wrong": wrong, "unanswered": unanswered, "percent": percent},
+            "answers": [
+                {"number": d["q"]["number"], "user": d["user"], "correct": d["q"]["correct_answer"], "status": d["status"]}
+                for d in details
+            ],
+        }
         st.download_button(
-            "💾 Natijani saqlash (JSON)",
-            data=json.dumps(result, ensure_ascii=False, indent=2),
-            file_name=f"natija_{result['student_name'].replace(' ', '_')}_{int(result['finished_at'])}.json",
+            "📥 JSON natija",
+            data=json.dumps(export_data, ensure_ascii=False, indent=2),
+            file_name=f"olimptest_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
             mime="application/json",
             use_container_width=True,
         )
-    with col3:
-        # Matn ko'rinishida hisobot
-        report_lines = [
-            f"OlimpTest Natijasi",
-            f"=" * 40,
-            f"Talaba: {result['student_name']}",
-            f"Test: {result['test_title']}",
-            f"Sana: {datetime.fromtimestamp(result['finished_at']).strftime('%Y-%m-%d %H:%M')}",
-            f"",
-            f"Jami savollar: {result['total_questions']}",
-            f"To'g'ri: {result['correct']}",
-            f"Noto'g'ri: {result['wrong']}",
-            f"O'tkazilgan: {result['skipped']}",
-            f"Natija: {result['percent']:.1f}%",
-            f"Sarflangan vaqt: {used // 60}:{used % 60:02d}",
-            f"",
-            f"Savollar:",
-            f"-" * 40,
-        ]
-        for q_dict in result["questions"]:
-            q = Question.from_dict(q_dict)
-            ua = result["answers"].get(str(q.number), "—")
-            report_lines.append(f"{q.number}. {q.question}")
-            report_lines.append(f"   Sizning javob: {ua}")
-            report_lines.append(f"   To'g'ri: {q.correct_answer}")
-            if q.explanation:
-                report_lines.append(f"   Izoh: {q.explanation}")
-            report_lines.append("")
+    with col2:
+        txt_report = f"""OlimpTest Natijasi
+=====================
+O'quvchi: {st.session_state.first_name} {st.session_state.last_name}
+Test: {title}
+Sana: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+Vaqt: {elapsed_min}:{elapsed_sec:02d}
+
+NATIJA: {correct}/{total} ({percent}%)
+To'g'ri: {correct}
+Noto'g'ri: {wrong}
+Javobsiz: {unanswered}
+"""
         st.download_button(
-            "📄 Hisobot (TXT)",
-            data="\n".join(report_lines),
-            file_name=f"hisobot_{int(result['finished_at'])}.txt",
+            "📄 TXT hisobot",
+            data=txt_report,
+            file_name=f"olimptest_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
             mime="text/plain",
             use_container_width=True,
         )
+    with col3:
+        if st.button("🔄 Yangi test", use_container_width=True, type="primary"):
+            st.session_state.test_started = False
+            st.session_state.test_finished = False
+            st.session_state.extracted_questions = None
+            st.session_state.user_answers = {}
+            st.session_state.current_question_idx = 0
+            st.rerun()
 
 
-# ============================================================================
-#                              ASOSIY ENTRY POINT
-# ============================================================================
+# ==========================================================================
+# WELCOME
+# ==========================================================================
 
-def main() -> None:
-    st.set_page_config(
-        page_title=APP_TITLE,
-        page_icon=APP_ICON,
-        layout="wide",
-        initial_sidebar_state="expanded",
-    )
-    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
-    init_session_state()
+def render_welcome():
+    st.markdown('<h1 class="main-title">🏆 OlimpTest</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="subtitle">AI yordamida olimpiada mashq platformasi · Matematik formulalar va rasmlarni o\'qiy oladi</p>',
+                unsafe_allow_html=True)
+
+    st.markdown("### 🚀 Qanday ishlatish")
+    cols = st.columns(4)
+    steps = [
+        ("1️⃣", "Ism kiritish", "Sidebar'dan ism va familiyangizni yozing"),
+        ("2️⃣", "Fayl yuklang", "Test faylini (PDF, Word, rasm) yuklang"),
+        ("3️⃣", "Vaqt belgilang", "Test uchun vaqt limitini sozlang"),
+        ("4️⃣", "Boshlang", "🚀 Testni boshlash tugmasini bosing"),
+    ]
+    for col, (icon, title, desc) in zip(cols, steps):
+        with col:
+            st.markdown(f'''
+                <div class="stat-card">
+                    <div style="font-size: 2rem">{icon}</div>
+                    <div style="font-weight: 700; color: #fbbf24; margin: 0.5rem 0">{title}</div>
+                    <div style="font-size: 0.85rem; color: #94a3b8">{desc}</div>
+                </div>
+            ''', unsafe_allow_html=True)
+
+    st.divider()
+
+    st.markdown("### ✨ Imkoniyatlar")
+    feat_cols = st.columns(3)
+    features = [
+        ("🔍 OCR Texnologiya",
+         "Tesseract OCR yordamida rasmlardan, skanerlangan PDF lardan va matematik formulalardan matn ajratib oladi. "
+         "O'zbek (lotin/kirill), rus, ingliz tillarini qo'llab-quvvatlaydi."),
+        ("🧠 Aqlli AI",
+         "Groq Llama 3.3 70B modeli javob kalitsiz testlarni ham o'zi yecha oladi. "
+         "Matematika, fizika, kimyo, biologiya — har qanday fanni tushunadi."),
+        ("⚡ Tezlik",
+         "Sizning olimpiadalarda tezligingizni oshirish uchun maxsus mashq muhiti. "
+         "Vaqt sanagich, savol navigatsiyasi va batafsil natijalar."),
+    ]
+    for col, (title, desc) in zip(feat_cols, features):
+        with col:
+            st.markdown(f'''
+                <div class="question-card">
+                    <h4 style="color: #fbbf24">{title}</h4>
+                    <p style="color: #cbd5e1; font-size: 0.9rem">{desc}</p>
+                </div>
+            ''', unsafe_allow_html=True)
+
+    if not get_groq_client():
+        st.warning("⚠️ Boshlash uchun sidebar'dan Groq API kalitini kiriting yoki Streamlit Secrets'ga qo'shing.")
+        with st.expander("📖 API kalit qanday olinadi?"):
+            st.markdown("""
+1. https://console.groq.com/keys saytiga kiring (bepul ro'yxatdan o'ting)
+2. **Create API Key** tugmasini bosing
+3. Hosil bo'lgan kalitni nusxalang
+4. **Streamlit Cloud** da: app sozlamalarida **Secrets** bo'limiga `GROQ_API_KEY = "sizning_kalitingiz"` qo'shing
+5. Yoki sidebar'dagi inputga vaqtinchalik kiriting
+            """)
+
+
+# ==========================================================================
+# MAIN
+# ==========================================================================
+
+def main():
     render_sidebar()
 
-    view = st.session_state.view
-    if view == "test":
+    if st.session_state.test_finished and st.session_state.extracted_questions:
+        render_results()
+    elif st.session_state.test_started and st.session_state.extracted_questions:
         render_test()
-    elif view == "result":
-        render_result()
     else:
-        render_home()
+        render_welcome()
 
 
 if __name__ == "__main__":
