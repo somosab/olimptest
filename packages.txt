@@ -1,9 +1,7 @@
-poppler-utils
 tesseract-ocr
-tesseract-ocr-uzb
-tesseract-ocr-uzb-cyrl
-tesseract-ocr-rus
 tesseract-ocr-eng
-tesseract-ocr-equ
+tesseract-ocr-rus
+tesseract-ocr-uzb
+poppler-utils
 libgl1
 libglib2.0-0
