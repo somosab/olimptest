@@ -1,5 +1,0 @@
-tesseract-ocr
-tesseract-ocr-eng
-tesseract-ocr-rus
-tesseract-ocr-uzb
-poppler-utils
