@@ -3,5 +3,3 @@ tesseract-ocr-eng
 tesseract-ocr-rus
 tesseract-ocr-uzb
 poppler-utils
-libgl1
-libglib2.0-0
