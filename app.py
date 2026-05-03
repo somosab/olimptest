@@ -369,6 +369,72 @@ def extract_pdf(file_bytes: bytes) -> dict:
         return {'text': '', 'images': []}
 
 
+# ==================== JSON ESCAPE TUZATISH ====================
+def fix_json_escapes(raw: str) -> str:
+    """
+    JSON string ichidagi noto'g'ri backslash escape larni tuzatish.
+    Muammo: AI LaTeX \frac, \sqrt, \cdot ... yozadi —
+    bular JSON da yaroqsiz escape hisoblanadi va JSONDecodeError beradi.
+    Yechim: JSON string qiymatlari ichidagi lone backslash larni \\ ga aylantirish.
+    """
+    # JSON da yaroqli escape ketma-ketliklari
+    VALID_NEXT = set('"\\\/bfnrtu')
+    result = []
+    in_string = False
+    escaped   = False
+    i = 0
+
+    while i < len(raw):
+        ch = raw[i]
+
+        if escaped:
+            if in_string and ch not in VALID_NEXT:
+                # Yaroqsiz escape — backslash ni ikkilashtirish
+                result.append('\\')
+            result.append(ch)
+            escaped = False
+            i += 1
+            continue
+
+        if ch == '\\':
+            escaped = True
+            result.append(ch)
+            i += 1
+            continue
+
+        if ch == '"' and not escaped:
+            in_string = not in_string
+
+        result.append(ch)
+        i += 1
+
+    return ''.join(result)
+
+
+def safe_json_loads(text: str):
+    """JSON parse — avval tuzatib, keyin parse qiladi"""
+    # 1-urinish: to'g'ridan-to'g'ri
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 2-urinish: escape larni tuzatib
+    try:
+        return json.loads(fix_json_escapes(text))
+    except json.JSONDecodeError:
+        pass
+
+    # 3-urinish: barcha \X (non-standard) ni \\X ga almashtirish (regex)
+    try:
+        fixed = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', text)
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        pass
+
+    return None
+
+
 # ==================== AI SAVOL TAHLILI ====================
 def parse_questions_with_ai(text: str, num_questions: int = 10) -> list:
     if not GROQ_API_KEY:
@@ -381,20 +447,20 @@ def parse_questions_with_ai(text: str, num_questions: int = 10) -> list:
 Undan {num_questions} ta savolni ajratib ol.
 
 QOIDALAR:
-1. Matnda allaqachon LaTeX formulalar ($...$, $$...$$) bor — ularni AYNAN saqlash.
-2. Agar qo'shimcha formulalar kerak bo'lsa LaTeX ga o'gir.
-3. Har bir savolda A, B, C, D variantlar majburiy.
-4. To'g'ri javobni aniq belgilamoq kerak.
-5. Faqat sof JSON qaytar — markdown, ``` yoki boshqa hech narsa qo'shma.
+1. Matnda allaqachon formulalar ($...$) bor — ularni AYNAN saqlash.
+2. Har bir savolda A, B, C, D variantlar majburiy.
+3. To'g'ri javobni aniq belgilamoq kerak.
+4. MUHIM: JSON string ichida LaTeX backslash \ ni \\\\ deb yoz (masalan \\\\frac, \\\\sqrt).
+5. Faqat sof JSON qaytar — ``` yoki boshqa narsa qo'shma.
 
-JSON struktura:
+JSON struktura (backslash lar \\\\ bo'lishi shart!):
 [
   {{
     "number": 1,
-    "question": "Savol matni (LaTeX formulalar $...$ ichida)",
-    "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}},
+    "question": "Savol. Formula: $\\\\frac{{a}}{{b}}$",
+    "options": {{"A": "1800", "B": "3000", "C": "1600", "D": "2000"}},
     "correct": "A",
-    "explanation": "Qisqa yechim"
+    "explanation": "Yechim"
   }}
 ]
 
@@ -405,21 +471,30 @@ MATN:
         resp = client.chat.completions.create(
             model='llama-3.3-70b-versatile',
             messages=[{'role': 'user', 'content': prompt}],
-            temperature=0.2,
+            temperature=0.1,
             max_tokens=4096,
         )
         content = resp.choices[0].message.content.strip()
-        content = re.sub(r'```(?:json)?', '', content).strip().rstrip('`')
 
+        # Markdown blokini tozalash
+        content = re.sub(r'```(?:json)?\s*', '', content).strip().rstrip('`').strip()
+
+        # JSON massivni ajratib olish
         match = re.search(r'\[.*\]', content, re.DOTALL)
-        if match:
-            return json.loads(match.group())
+        if not match:
+            st.warning("AI dan JSON topilmadi:\n" + content[:400])
+            return []
 
-        st.warning("AI dan JSON olinmadi. Xom javob:\n" + content[:500])
-        return []
-    except json.JSONDecodeError as e:
-        st.error(f"JSON parse xatosi: {e}")
-        return []
+        json_str = match.group()
+        result   = safe_json_loads(json_str)
+
+        if result is None:
+            st.error("JSON parse muvaffaqiyatsiz. AI javobi:")
+            st.code(json_str[:600])
+            return []
+
+        return result
+
     except Exception as e:
         st.error(f"AI xatosi: {e}")
         return []
