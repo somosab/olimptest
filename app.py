@@ -583,3 +583,9 @@ else:
     if st.button("🔄 Yangi test", type="primary", use_container_width=True):
         for k in list(st.session_state.keys()): del st.session_state[k]
         st.rerun()
+
+st.markdown("---")
+st.markdown(
+    "<p style='text-align:center; color:#888; font-size:14px;'>Yaratuvchi: Usmonov Sodiq</p>",
+    unsafe_allow_html=True,
+)
