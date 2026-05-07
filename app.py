@@ -43,20 +43,13 @@ st.markdown("""
     }
     .result-correct { color:#2ECC71; font-weight:bold; }
     .result-wrong   { color:#E74C3C; font-weight:bold; }
-    .image-container { 
-        background: rgba(255,255,255,0.05);
-        border: 2px solid rgba(255,215,0,0.3);
-        border-radius: 12px;
-        padding: 15px;
-        margin: 10px 0;
-    }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ==================== MATH RENDER (KaTeX) ====================
 def render_math_html(text: str, font_size: str = "20px", bg: str = "rgba(255,255,255,0.05)") -> None:
-    """KaTeX bilan formulalarni to'g'ri render qilish"""
+    """KaTeX bilan formulalarni to'g'ri render qilish."""
     html = f"""
 <!DOCTYPE html>
 <html>
@@ -70,9 +63,7 @@ def render_math_html(text: str, font_size: str = "20px", bg: str = "rgba(255,255
           onload="renderMathInElement(document.body, {{
             delimiters: [
               {{left:'$$', right:'$$', display:true}},
-              {{left:'$',  right:'$',  display:false}},
-              {{left:'\\[', right:'\\]', display:true}},
-              {{left:'\\(', right:'\\)', display:false}}
+              {{left:'$',  right:'$',  display:false}}
             ],
             throwOnError: false
           }});"></script>
@@ -224,92 +215,54 @@ def get_para_text(para) -> str:
     return ''.join(parts)
 
 
-# ==================== RASMNI TEKSHIRISH (Geometrik/Chizma) ====================
+# ==================== RASM TEKSHIRISH ====================
 def is_geometric_image(image_bytes: bytes) -> bool:
-    """Rasm geometrik chizma yoki yozuv ekanligini tekshirish"""
+    """Geometrik chizmani yoki diagrammani aniqlab beradi"""
     try:
         img = Image.open(io.BytesIO(image_bytes))
-        img_array = np.array(img.convert('RGB'))
+        arr = np.array(img.convert('RGB'))
         
-        # Rang diversity tekshirish
-        unique_colors = len(np.unique(img_array.reshape(-1, 3), axis=0))
+        # Kam rang = chizma yoki diagramma
+        unique_colors = len(np.unique(arr.reshape(-1, 3), axis=0))
+        is_simple = unique_colors < 100
         
-        # Geometrik chizmalar kam rang ishlatadi
-        is_drawing = unique_colors < 5000
+        # Kichik o'lcham = chizma
+        is_small = img.size[0] * img.size[1] < 500000
         
-        # O'lcham tekshirish (chizmalar odatda kichik)
-        is_small = img.width < 1024 or img.height < 1024
-        
-        return is_drawing and is_small
+        return is_simple or is_small
     except:
         return False
 
 
-# ==================== COHERE BILAN RASMNI TAHLIL QILISH ====================
+# ==================== COHERE RASM TAHLILI ====================
 def analyze_image_with_cohere(image_bytes: bytes) -> dict:
-    """Cohere API bilan rasmni tahlil qilish"""
+    """Cohere bilan rasmni tahlil qilish"""
     if not COHERE_API_KEY:
-        return {'text': '', 'type': 'unknown', 'description': ''}
+        return {'description': 'Rasm: tahlil qilinmadi (API key yo\'q)', 'elements': []}
     
     try:
-        client = cohere.ClientV2(api_key=COHERE_API_KEY)
-        
+        co = cohere.ClientV2(api_key=COHERE_API_KEY)
         b64_image = base64.b64encode(image_bytes).decode('utf-8')
         
-        is_geometric = is_geometric_image(image_bytes)
-        
-        prompt = f"""Bu rasm matematika olimpiadasi testidagi savol uchun.
-
-Rasm turi: {'Geometrik chizma/Yozuv' if is_geometric else 'Diagramma'}
-
-Quyidagilarni aniqlang:
-1. Rasmda nima ko'rsatilgan? (geometrik shakllar, grafik, yozuv va boshq)
-2. Agar chizmada o'lchamlar, burchaklar yoki formulalar bo'lsa, ularni yozing
-3. LaTeX formatida matematika belgilari (agar bo'lsa)
-4. Rasmdan qanday savol tuzish mumkin?
-
-JSON formatida javob bering:
-{{"description": "Rasmning tavsifi", "elements": "Asosiy elementlar", "formulas": "Formulalar (LaTeX)", "question_hint": "Savol uchun maslahat"}}"""
-
-        response = client.messages.create(
-            model="command-r-plus-vision",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": b64_image,
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": prompt
-                        }
-                    ],
+        response = co.chat(
+            model="command-r-plus",
+            messages=[{
+                "role": "user",
+                "content": "Bu rasm nima? Geometrik shakllar, formulalar, diagrammalar mavjudmi? Qisqacha ta'rif ber.",
+            }],
+            documents=[{
+                "id": "image_1",
+                "data": {
+                    "type": "image",
+                    "data": b64_image,
                 }
-            ],
-            max_tokens=1024,
+            }]
         )
         
-        result_text = response.content[0].text
-        
-        try:
-            json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group())
-            else:
-                result = {'description': result_text, 'type': 'geometric' if is_geometric else 'diagram'}
-        except:
-            result = {'description': result_text, 'type': 'geometric' if is_geometric else 'diagram'}
-        
-        return result
+        description = response.message.content[0].text if response.message.content else "Rasm"
+        return {'description': description, 'elements': [description]}
     except Exception as e:
-        st.warning(f"⚠️ Rasm tahlil: {str(e)[:100]}")
-        return {'text': '', 'type': 'unknown'}
+        return {'description': f'Rasm tahlili xatosi: {str(e)[:50]}', 'elements': []}
 
 
 # ==================== FAYL O'QISH ====================
@@ -334,10 +287,8 @@ def extract_docx(file_bytes: bytes) -> dict:
         for rel in doc.part.rels.values():
             if "image" in rel.target_ref:
                 try:
-                    ext = rel.target_ref.split('.')[-1].lower()
-                    mime = f"image/{'jpeg' if ext in ('jpg','jpeg') else ext}"
-                    b64  = base64.b64encode(rel.target_part.blob).decode()
-                    images.append({'b64': b64, 'mime': mime, 'bytes': rel.target_part.blob})
+                    blob = rel.target_part.blob
+                    images.append({'bytes': blob, 'is_geometric': is_geometric_image(blob)})
                 except Exception: pass
 
         final = '\n\n'.join(lines)
@@ -360,7 +311,7 @@ def extract_pdf(file_bytes: bytes) -> dict:
 # ==================== JSON TUZATISH ====================
 def fix_json_escapes(raw: str) -> str:
     """JSON string ichidagi yaroqsiz LaTeX backslash larni tuzatish"""
-    VALID = set('"\\\/bfnrtu')
+    VALID = set(r'"\\bfnrtu' + '"')
     result, in_str, esc = [], False, False
     for ch in raw:
         if esc:
@@ -375,33 +326,34 @@ def fix_json_escapes(raw: str) -> str:
 def safe_json(text: str):
     for fn in [json.loads,
                lambda t: json.loads(fix_json_escapes(t)),
-               lambda t: json.loads(re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', t))]:
+               lambda t: json.loads(re.sub(r'\\(?!["\\\\/bfnrtu])', r'\\\\', t))]:
         try: return fn(text)
         except: pass
     return None
 
 
-# ==================== GROQ BILAN AI TAHLIL ====================
+# ==================== AI TAHLIL ====================
 def parse_questions_with_ai(text: str, image_data: list = None) -> list:
     if not GROQ_API_KEY:
         st.error("⚠️ GROQ_API_KEY topilmadi."); return []
 
     client = Groq(api_key=GROQ_API_KEY)
 
-    # Rasmlarni tahlil qilish
+    # Rasmlar tahlili
     image_descriptions = ""
     if image_data:
         st.info("🖼️ Rasmlar tahlil qilinmoqda...")
         for idx, img_info in enumerate(image_data):
-            analysis = analyze_image_with_cohere(img_info['bytes'])
-            desc = analysis.get('description', analysis.get('elements', ''))
-            image_descriptions += f"\n\n📸 Rasm {idx+1}: {desc}"
+            if img_info.get('is_geometric'):
+                analysis = analyze_image_with_cohere(img_info['bytes'])
+                desc = analysis.get('description', '')
+                image_descriptions += f"\n\n📸 Geometrik Rasm {idx+1}: {desc}"
 
     lines       = [l.strip() for l in text.split('\n') if l.strip()]
     num_approx  = sum(1 for l in lines if re.match(r'^\d+[\.\)]\s', l))
     num_ask     = max(num_approx, 5) if num_approx else 10
 
-    prompt = f"""Bu MATEMATIKA olimpiada test savollari. Barcha {num_ask} ta savolni ajratib ol.
+    prompt = f"""Bu olimpiada test savollari. Barcha {num_ask} ta savolni ajratib ol.
 
 MUHIM QOIDALAR:
 1. Matnda formulalar ($...$) bor — ularni AYNAN ko'chir.
@@ -409,11 +361,8 @@ MUHIM QOIDALAR:
 3. A, B, C, D variantlar majburiy.
 4. To'g'ri javobni belgilamoq kerak.
 5. JSON string ichida backslash: \\\\ (ikkita) bo'lsin.
-6. Agar rasmda chizmalar bo'lsa, savol matniga kiriting.
-7. Faqat JSON massivi qaytar — boshqa hech narsa yozma.
-
-RASMLARDAN TAHLIL:
-{image_descriptions}
+6. Faqat JSON massivi qaytar — boshqa hech narsa yozma.
+7. FAQAT MATEMATIK savollar qo'shish.
 
 [
   {{
@@ -424,6 +373,9 @@ RASMLARDAN TAHLIL:
     "explanation": "Yechim"
   }}
 ]
+
+RASMLAR:
+{image_descriptions}
 
 MATN:
 {text[:9000]}"""
@@ -471,7 +423,7 @@ DEFAULTS = {
     'started':False,'finished':False,
     'name':'','surname':'',
     'duration':90,'start_time':None,
-    'uploaded_files':[],'images':[],'geometric_images':[],
+    'uploaded_files':[],'images':[],
 }
 for k,v in DEFAULTS.items():
     if k not in st.session_state: st.session_state[k]=v
@@ -503,7 +455,7 @@ with st.sidebar:
 
 # ==================== ASOSIY SAHIFA ====================
 st.title("🏆 OlimpTest")
-st.markdown("#### Olimpiada Mashq Platformasi (MATEMATIKA)")
+st.markdown("#### Olimpiada Mashq Platformasi")
 
 # ─── BOSHLASH ────────────────────────────────────────
 if not st.session_state.started:
@@ -515,8 +467,8 @@ if not st.session_state.started:
         <li>Ism-familiyangizni kiriting</li>
         <li>Word (.docx) yoki PDF fayl yuklang</li>
         <li>Vaqt belgilang va "Testni boshlash" tugmasini bosing</li>
-        <li><b>✨ Matematik formulalar va geometrik chizmalar avtomatik tahlil qilinadi</b></li>
-        <li><b>🖼️ Chizmalar va yozuvlar alohida ko'rsatiladi</b></li>
+        <li><b>Matematik formulalar avtomatik aniqlanadi va chiroyli ko'rinadi</b></li>
+        <li><b>Geometrik rasmlar avtomatik tahlil qilinadi</b></li>
     </ul>
     </div>
     """, unsafe_allow_html=True)
@@ -542,24 +494,15 @@ if not st.session_state.started:
             if not all_text.strip():
                 st.error("❌ Fayldan matn olinmadi."); st.stop()
 
-            with st.spinner("🤖 AI savollarni tahlil qilmoqda (rasmlar + matn)..."):
-                # Rasmlar bytes'ini tayyorlash
-                image_bytes_list = [img['bytes'] for img in all_images] if all_images else None
-                questions = parse_questions_with_ai(all_text, image_bytes_list)
+            with st.spinner("🤖 AI savollarni tahlil qilmoqda (rasmlar ham)..."):
+                image_bytes_list = [img['bytes'] for img in all_images]
+                questions = parse_questions_with_ai(all_text, all_images if all_images else None)
 
             if not questions:
                 st.error("❌ Savollar tahlil qilinmadi."); st.stop()
 
-            # Geometrik rasmlarni ajratib olish
-            geometric_imgs = []
-            if all_images:
-                for img in all_images:
-                    if is_geometric_image(img['bytes']):
-                        geometric_imgs.append(img)
-
             st.session_state.questions  = questions
             st.session_state.images     = all_images
-            st.session_state.geometric_images = geometric_imgs
             st.session_state.started    = True
             st.session_state.start_time = time.time()
             st.session_state.current_q  = 0
@@ -602,15 +545,6 @@ elif not st.session_state.finished:
     q_num  = q.get('number', q_idx + 1)
     q_text = q.get('question', '')
     render_math_html(f"<b>{q_num}.</b> {q_text}", font_size="20px")
-
-    # ── Geometrik chizmalar — agar savol uchun bo'lsa ──
-    if st.session_state.geometric_images and q_idx < len(st.session_state.geometric_images):
-        st.markdown("#### 📐 Geometrik Chizma:")
-        img_bytes = st.session_state.geometric_images[q_idx]['bytes']
-        img = Image.open(io.BytesIO(img_bytes))
-        st.markdown('<div class="image-container">', unsafe_allow_html=True)
-        st.image(img, use_column_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
 
     # ── Variantlar ──
     options  = q.get('options', {})
@@ -697,14 +631,6 @@ else:
 
         with st.expander(f"{icon}  Savol {i+1}  |  Sizning: {user_ans or '—'}  |  To'g'ri: {correct_ans}"):
             render_math_html(f"<b>Savol:</b> {q['question']}")
-            
-            # Geometrik chizmani ko'rsatish
-            if st.session_state.geometric_images and i < len(st.session_state.geometric_images):
-                st.markdown("**📐 Chizma:**")
-                img_bytes = st.session_state.geometric_images[i]['bytes']
-                img = Image.open(io.BytesIO(img_bytes))
-                st.image(img, width=300)
-            
             for k,v in q.get('options',{}).items():
                 if k == correct_ans:
                     render_math_html(f"✅ <b>{k})</b> {v}", bg="rgba(46,204,113,0.15)")
@@ -721,6 +647,6 @@ else:
 
 st.markdown("---")
 st.markdown(
-    "<p style='text-align:center; color:#888; font-size:14px;'>Yaratuvchi: Usmonov Sodiq | Cohere + Groq</p>",
+    "<p style='text-align:center; color:#888; font-size:14px;'>Yaratuvchi: Usmonov Sodiq</p>",
     unsafe_allow_html=True,
 )
