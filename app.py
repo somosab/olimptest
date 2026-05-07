@@ -41,6 +41,13 @@ st.markdown("""
         padding:15px 25px; border-radius:12px;
         color:white; font-size:24px; font-weight:bold; text-align:center;
     }
+    .image-box {
+        background: rgba(255,255,255,0.05);
+        border: 2px solid rgba(255,215,0,0.3);
+        border-radius: 12px;
+        padding: 20px;
+        margin: 15px 0;
+    }
     .result-correct { color:#2ECC71; font-weight:bold; }
     .result-wrong   { color:#E74C3C; font-weight:bold; }
 </style>
@@ -223,10 +230,7 @@ def is_geometric_image(img_array) -> bool:
     else:
         gray = img_array
     
-    # Rang soni - kam bo'lsa chizma
     unique_colors = len(np.unique(gray))
-    
-    # Qora fonda yozuvlar - chizma belgisi
     dark_pixels = np.sum(gray < 100) / gray.size
     
     return unique_colors < 100 or dark_pixels > 0.3
@@ -235,12 +239,10 @@ def is_geometric_image(img_array) -> bool:
 def analyze_image_with_cohere(img_bytes: bytes) -> str:
     """Cohere Vision bilan rasmni tahlil qilish"""
     if not COHERE_API_KEY:
-        return "Rasmni tahlil qilish kerak lekin API key yo'q"
+        return "🔑 Cohere API key yo'q"
     
     try:
         client = cohere.ClientV2(api_key=COHERE_API_KEY)
-        
-        # Rasmni base64 ga o'girish
         img_base64 = base64.b64encode(img_bytes).decode('utf-8')
         
         response = client.chat(
@@ -259,7 +261,11 @@ def analyze_image_with_cohere(img_bytes: bytes) -> str:
                         },
                         {
                             "type": "text",
-                            "text": "Bu rasm nima? Geometrik shakllar, formulalar, chizmalar bo'lsa tavsilabi. Faqat tavsif ber, boshqa narsa yozma. O'zbek tilida yoz."
+                            "text": r"""Bu rasm nima? Agar geometrik shakl, chizma, diagrama bo'lsa:
+- Shakllarni nomla (uchburchak, doira, to'rtburchak va hokazo)
+- Chiziqlar, burchaklar, o'lchamlari
+- Formulalar yoki raqamlar
+Faqat tavsif ber, boshqa narsa yozma. O'zbek tilida."""
                         }
                     ],
                 }
@@ -268,7 +274,7 @@ def analyze_image_with_cohere(img_bytes: bytes) -> str:
         
         return response.message.content[0].text if response.message.content else "Rasm tahlil qilinmadi"
     except Exception as e:
-        return f"Xatolik: {str(e)}"
+        return f"⚠️ Xatolik: {str(e)[:100]}"
 
 
 # ==================== FAYL O'QISH ====================
@@ -357,7 +363,6 @@ def parse_questions_with_ai(text: str, image_bytes_list: list) -> list:
         st.error("⚠️ GROQ_API_KEY topilmadi.")
         return []
 
-    # Rasmlarni tahlil qilish
     image_descriptions = ""
     if image_bytes_list:
         with st.spinner("🖼️ Rasmlar tahlil qilinmoqda..."):
@@ -367,7 +372,7 @@ def parse_questions_with_ai(text: str, image_bytes_list: list) -> list:
                     if is_geometric_image(img_array):
                         desc = analyze_image_with_cohere(img_bytes)
                         image_descriptions += f"\n\n📸 Geometrik Rasm {idx+1}: {desc}"
-                except Exception as e:
+                except Exception:
                     pass
 
     client = Groq(api_key=GROQ_API_KEY)
@@ -447,6 +452,7 @@ DEFAULTS = {
     'name':'','surname':'',
     'duration':90,'start_time':None,
     'uploaded_files':[],'images':[],
+    'question_images':{}
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
@@ -565,6 +571,20 @@ elif not st.session_state.finished:
     q_num = q.get('number', q_idx + 1)
     q_text = q.get('question', '')
     render_math_html(f"<b>{q_num}.</b> {q_text}", font_size="20px")
+
+    # RASMLAR - ALOHIDA JOY
+    if st.session_state.images:
+        st.markdown("---")
+        st.markdown("### 🖼️ Qo'shimcha Rasmlar")
+        img_cols = st.columns(min(3, len(st.session_state.images)))
+        for idx, img_data in enumerate(st.session_state.images):
+            with img_cols[idx % len(img_cols)]:
+                try:
+                    img = Image.open(io.BytesIO(img_data['bytes']))
+                    st.image(img, caption=f"Rasm {idx+1}", use_container_width=True)
+                except:
+                    st.warning(f"Rasm {idx+1} ko'rsatilmadi")
+        st.markdown("---")
 
     # Variantlar
     options = q.get('options', {})
