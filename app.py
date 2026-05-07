@@ -12,7 +12,7 @@ import numpy as np
 
 # ==================== SOZLAMALAR ====================
 st.set_page_config(
-    page_title="OlimpTest",
+    page_title="OlimpTest - Matematika",
     page_icon="🏆",
     layout="wide",
 )
@@ -55,36 +55,22 @@ def render_math_html(text: str, font_size: str = "20px", bg: str = "rgba(255,255
 <!DOCTYPE html>
 <html>
 <head>
-  <link rel="stylesheet"
-        href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
-  <script defer
-          src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
-  <script defer
-          src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"
-          onload="renderMathInElement(document.body, {{
-            delimiters: [
-              {{left:'$$', right:'$$', display:true}},
-              {{left:'$',  right:'$',  display:false}}
-            ],
-            throwOnError: false
-          }});"></script>
-  <style>
-    body {{
-      background: {bg};
-      color: #E0E0E0;
-      font-size: {font_size};
-      font-family: 'Segoe UI', sans-serif;
-      padding: 16px 20px;
-      border-radius: 12px;
-      border: 2px solid rgba(255,215,0,0.3);
-      margin: 0;
-    }}
-    .katex {{ color: #FFD700; font-size: 1.15em; }}
-    .katex-display {{ color: #FFD700; }}
-  </style>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {{
+      delimiters: [
+        {{left:'$$', right:'$$', display:true}},
+        {{left:'$',  right:'$',  display:false}}
+      ],
+      throwOnError: false
+    }});"></script>
 </head>
-<body>{text}</body>
-</html>"""
+<body style="background:{bg}; color:#E0E0E0; font-size:{font_size}; padding:10px; border-radius:8px; font-family:sans-serif;">
+{text}
+</body>
+</html>
+"""
     height = max(80, min(400, 80 + len(text) // 3))
     components.html(html, height=height, scrolling=False)
 
@@ -94,7 +80,7 @@ MN = '{http://schemas.openxmlformats.org/officeDocument/2006/math}'
 WN = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
 
 NARY_OPS = {'\u222b':'\\int','\u222c':'\\iint','\u222d':'\\iiint',
-             '\u2211':'\\sum','\u220f':'\\prod','\u222e':'\\oint'}
+            '\u2211':'\\sum','\u220f':'\\prod','\u222e':'\\oint'}
 PROP_TAGS = {'rPr','fPr','radPr','naryPr','dPr','sSupPr','sSubPr','sSubSupPr',
              'funcPr','sPr','limLowPr','limUppPr','eqArrPr','mPr','ctrlPr',
              'groupChrPr','borderBoxPr','barPr','accPr','phantPr','boxPr'}
@@ -159,7 +145,7 @@ def omml_to_latex(el) -> str:
         return f'{FN_MAP.get(f_raw, f_raw)}\\left({c}\\right)'
     if tag == 'd':
         pr = el.find(f'{MN}dPr')
-        left,right = '(',')' 
+        left,right = '(',')'
         if pr is not None:
             beg = pr.find(f'{MN}begChr'); end = pr.find(f'{MN}endChr')
             if beg is not None: left  = beg.get(f'{MN}val','(') or '.'
@@ -195,7 +181,6 @@ def omml_to_latex(el) -> str:
 
 # ==================== PARAGRAPH MATN ====================
 def get_para_text(para) -> str:
-    """para.text OMML ni o'tkazib yuboradi"""
     parts = []
     for child in para._element:
         ctag = child.tag
@@ -218,50 +203,31 @@ def get_para_text(para) -> str:
 
 # ==================== RASM TAHLILI ====================
 def is_geometric_image(img_array) -> bool:
-    """Chizma yoki diagrama ekanligini aniqlash"""
     if len(img_array.shape) == 3:
         gray = np.mean(img_array, axis=2)
     else:
         gray = img_array
-    
     unique_colors = len(np.unique(gray))
     dark_pixels = np.sum(gray < 100) / gray.size
-    
     return unique_colors < 100 or dark_pixels > 0.3
 
 
 def analyze_image_with_cohere(img_bytes: bytes) -> str:
-    """Cohere Vision bilan rasmni tahlil qilish"""
     if not COHERE_API_KEY:
         return "Rasmni tahlil qilish kerak lekin API key yo'q"
-    
     try:
         client = cohere.ClientV2(api_key=COHERE_API_KEY)
         img_base64 = base64.b64encode(img_bytes).decode('utf-8')
-        
         response = client.chat(
             model="command-r-plus-vision",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": img_base64,
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": "Bu rasm nima? Geometrik shakllar, formulalar, chizmalar bo'lsa tavsilabi. Faqat tavsif ber. O'zbek tilida yoz."
-                        }
-                    ],
-                }
-            ],
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_base64}},
+                    {"type": "text", "text": "Bu matematika masalasi rasmidir. Geometrik shakl, grafik yoki diagrammani batafsil tasvirla: o'lchamlar, burchaklar, yorliqlar. O'zbek tilida yoz."}
+                ],
+            }],
         )
-        
         return response.message.content[0].text if response.message.content else "Rasm tahlil qilinmadi"
     except Exception as e:
         return f"Xatolik: {str(e)}"
@@ -272,20 +238,16 @@ def extract_docx(file_bytes: bytes) -> dict:
     try:
         doc = Document(io.BytesIO(file_bytes))
         lines, images = [], []
-
         for para in doc.paragraphs:
             t = get_para_text(para).strip()
             if t: lines.append(t)
-
         for table in doc.tables:
             for row in table.rows:
                 row_parts = []
                 for cell in row.cells:
-                    ct = ' '.join(get_para_text(p).strip() for p in cell.paragraphs
-                                  if get_para_text(p).strip())
+                    ct = ' '.join(get_para_text(p).strip() for p in cell.paragraphs if get_para_text(p).strip())
                     if ct: row_parts.append(ct)
                 if row_parts: lines.append(' | '.join(row_parts))
-
         for rel in doc.part.rels.values():
             if "image" in rel.target_ref:
                 try:
@@ -294,29 +256,27 @@ def extract_docx(file_bytes: bytes) -> dict:
                     img_bytes = rel.target_part.blob
                     images.append({'bytes': img_bytes, 'mime': mime})
                 except Exception: pass
-
         final = '\n\n'.join(lines)
         if not final.strip():
             res = mammoth.convert_to_html(io.BytesIO(file_bytes))
-            final = BeautifulSoup(res.value,'html.parser').get_text('\n',strip=True)
+            final = BeautifulSoup(res.value, 'html.parser').get_text('\n', strip=True)
         return {'text': final, 'images': images}
     except Exception as e:
         st.error(f"Word xatolik: {e}")
-        return {'text':'','images':[]}
+        return {'text': '', 'images': []}
 
 
 def extract_pdf(file_bytes: bytes) -> dict:
     try:
         r = PyPDF2.PdfReader(io.BytesIO(file_bytes))
-        return {'text':'\n\n'.join(p.extract_text() or '' for p in r.pages),'images':[]}
+        return {'text': '\n\n'.join(p.extract_text() or '' for p in r.pages), 'images': []}
     except Exception as e:
         st.error(f"PDF xatolik: {e}")
-        return {'text':'','images':[]}
+        return {'text': '', 'images': []}
 
 
 # ==================== JSON TUZATISH ====================
 def fix_json_escapes(raw: str) -> str:
-    """JSON string ichidagi yaroqsiz LaTeX backslash larni tuzatish"""
     VALID = set(r'"\\bfnrtu/')
     result, in_str, esc = [], False, False
     for ch in raw:
@@ -367,44 +327,55 @@ def parse_questions_with_ai(text: str, image_bytes_list: list) -> list:
 
     client = Groq(api_key=GROQ_API_KEY)
 
+    # ✅ Savollar sonini to'g'ri sanash: "1." yoki "1)" formatlari
     lines = [l.strip() for l in text.split('\n') if l.strip()]
-    num_approx = sum(1 for l in lines if re.match(r'^\d+[\.]\)\s', l))
-    num_ask = max(num_approx, 5) if num_approx else 10
+    question_numbers = set()
+    for l in lines:
+        m = re.match(r'^(\d+)\s*[\.\)]\s', l)
+        if m:
+            n = int(m.group(1))
+            if 1 <= n <= 100:
+                question_numbers.add(n)
+    num_ask = len(question_numbers) if question_numbers else 10
+    st.info(f"📊 Faylda topilgan savollar soni: **{num_ask}**")
 
-    prompt = f"""Bu olimpiada test savollari. Barcha {num_ask} ta savolni ajratib ol.
+    prompt = f"""Bu MATEMATIKA olimpiada test savollari. Faylda JAMI {num_ask} TA SAVOL bor.
+SENGA BARCHA {num_ask} TA SAVOLNI AJRATIB OLISH SHART. Birortasini ham qoldirma!
 
-MUHIM QOIDALAR:
-1. Matnda formulalar ($...$) bor — ularni AYNAN ko'chir.
-2. CDOT (·) belgisini \\cdot deb yoz.
-3. A, B, C, D variantlar majburiy.
-4. To'g'ri javobni belgilamoq kerak.
-5. JSON string ichida backslash: \\\\ (ikkita) bo'lsin.
-6. Faqat JSON massivi qaytar — boshqa hech narsa yozma.
+QOIDALAR:
+1. Matematik formulalar ($...$ yoki $$...$$) — AYNAN ko'chir, o'zgartirma.
+2. \\cdot, \\frac, \\sqrt, ^, _ kabi LaTeX belgilarni saqla.
+3. Har bir savolda A, B, C, D variantlar bo'lishi shart.
+4. To'g'ri javobni MATEMATIK YECHIB aniqla (taxmin qilma).
+5. JSON string ichida backslash IKKITA bo'lsin: \\\\frac, \\\\sqrt, \\\\cdot.
+6. FAQAT JSON massivi qaytar — boshqa matn YOZMA.
+7. Savollar soni AYNAN {num_ask} TA bo'lsin.
 
+Format:
 [
   {{
     "number": 1,
-    "question": "Savol ($\\\\frac{{a}}{{b}}$ kabi)",
+    "question": "Savol matni ($\\\\frac{{a}}{{b}}$ kabi formulalar bilan)",
     "options": {{"A":"...","B":"...","C":"...","D":"..."}},
     "correct": "B",
-    "explanation": "Yechim"
+    "explanation": "Qisqa matematik yechim"
   }}
 ]
 
 MATN:
-{text[:9000]}
+{text[:20000]}
 
 {image_descriptions}"""
 
     try:
         resp = client.chat.completions.create(
             model='llama-3.3-70b-versatile',
-            messages=[{'role':'user','content':prompt}],
+            messages=[{'role': 'user', 'content': prompt}],
             temperature=0.1,
-            max_tokens=4096,
+            max_tokens=8192,
         )
         content = resp.choices[0].message.content.strip()
-        content = re.sub(r'```(?:json)?\s*','',content).strip().rstrip('`').strip()
+        content = re.sub(r'```(?:json)?\s*', '', content).strip().rstrip('`').strip()
 
         m = re.search(r'\[.*\]', content, re.DOTALL)
         if not m:
@@ -415,6 +386,12 @@ MATN:
         if result is None:
             st.error("JSON parse muvaffaqiyatsiz")
             return []
+
+        if len(result) < num_ask:
+            st.warning(f"⚠️ AI faqat {len(result)}/{num_ask} ta savol qaytardi.")
+        else:
+            st.success(f"✅ {len(result)} ta savol muvaffaqiyatli olindi")
+
         return result
     except Exception as e:
         st.error(f"AI xatosi: {e}")
@@ -423,9 +400,9 @@ MATN:
 
 # ==================== YORDAMCHILAR ====================
 def grade(pct):
-    if pct>=85: return "5 — A'lo"
-    if pct>=70: return "4 — Yaxshi"
-    if pct>=50: return "3 — Qoniqarli"
+    if pct >= 85: return "5 — A'lo"
+    if pct >= 70: return "4 — Yaxshi"
+    if pct >= 50: return "3 — Qoniqarli"
     return "2 — Qoniqarsiz"
 
 
@@ -437,11 +414,11 @@ def fmt_time(sec):
 
 # ==================== SESSION STATE ====================
 DEFAULTS = {
-    'questions':[],'current_q':0,'answers':{},
-    'started':False,'finished':False,
-    'name':'','surname':'',
-    'duration':90,'start_time':None,
-    'uploaded_files':[],'images':[],'image_map':{},
+    'questions': [], 'current_q': 0, 'answers': {},
+    'started': False, 'finished': False,
+    'name': '', 'surname': '',
+    'duration': 90, 'start_time': None,
+    'uploaded_files': [], 'images': [], 'image_map': {},
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
@@ -461,7 +438,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 📁 Test fayllari")
     uploaded = st.file_uploader("Fayl yuklang (.docx yoki .pdf)",
-                                type=["docx","pdf"], accept_multiple_files=True)
+                                type=["docx", "pdf"], accept_multiple_files=True)
     if uploaded:
         st.session_state.uploaded_files = uploaded
         for f in uploaded:
@@ -475,22 +452,21 @@ with st.sidebar:
 
 
 # ==================== ASOSIY SAHIFA ====================
-st.title("🏆 OlimpTest")
-st.markdown("#### Olimpiada Mashq Platformasi")
+st.title("🏆 OlimpTest — Matematika")
+st.markdown("#### Matematika Olimpiada Mashq Platformasi")
 
 # ─── BOSHLASH ────────────────────────────────────────
 if not st.session_state.started:
     st.markdown("""
-    <div style="background:rgba(255,255,255,0.05);padding:25px;border-radius:15px;
-                border:2px solid rgba(255,215,0,0.3);margin:15px 0;">
-    <h3 style="color:#FFD700;">📋 Qo'llanma</h3>
-    <ul style="color:#E0E0E0;">
-        <li>Ism-familiyangizni kiriting</li>
-        <li>Word (.docx) yoki PDF fayl yuklang</li>
-        <li>Vaqt belgilang va "Testni boshlash" tugmasini bosing</li>
-        <li><b>Matematik formulalar va rasmlar avtomatik aniqlanadi</b></li>
-    </ul>
-    </div>
+<div style="background:rgba(255,255,255,0.05); padding:20px; border-radius:12px; border:1px solid rgba(255,215,0,0.3);">
+<h3>📋 Qo'llanma</h3>
+<ol>
+<li>Ism-familiyangizni kiriting</li>
+<li>Word (.docx) yoki PDF fayl yuklang</li>
+<li>Vaqt belgilang va "Testni boshlash" tugmasini bosing</li>
+<li>Matematik formulalar va rasmlar avtomatik aniqlanadi</li>
+</ol>
+</div>
     """, unsafe_allow_html=True)
 
     if st.session_state.uploaded_files and st.session_state.name.strip():
@@ -507,7 +483,7 @@ if not st.session_state.started:
                 st.error("❌ Fayldan matn olinmadi.")
                 st.stop()
 
-            with st.spinner("🤖 AI savollarni tahlil qilmoqda..."):
+            with st.spinner("🤖 AI matematika savollarini tahlil qilmoqda..."):
                 image_bytes_list = [img['bytes'] for img in all_images]
                 questions = parse_questions_with_ai(all_text, image_bytes_list)
 
@@ -517,20 +493,21 @@ if not st.session_state.started:
 
             # Rasmlarni savollar bilan bog'lash
             image_map = {}
-            for idx, q in enumerate(questions):
-                q_text = q.get('question', '').lower()
-                matched_images = []
-                for img_idx, img_bytes in enumerate(image_bytes_list):
-                    try:
-                        img_array = np.array(Image.open(io.BytesIO(img_bytes)))
-                        if is_geometric_image(img_array):
-                            # Rasm bu savol bilan bog'liq deb faraz qil
-                            if (idx * len(image_bytes_list)) // len(questions) <= img_idx < ((idx + 1) * len(image_bytes_list)) // len(questions):
-                                matched_images.append(img_bytes)
-                    except Exception:
-                        pass
-                if matched_images:
-                    image_map[idx] = matched_images
+            geometric_imgs = []
+            for img_bytes in image_bytes_list:
+                try:
+                    img_array = np.array(Image.open(io.BytesIO(img_bytes)))
+                    if is_geometric_image(img_array):
+                        geometric_imgs.append(img_bytes)
+                except Exception:
+                    pass
+
+            if geometric_imgs and questions:
+                for idx in range(len(questions)):
+                    start = (idx * len(geometric_imgs)) // len(questions)
+                    end = ((idx + 1) * len(geometric_imgs)) // len(questions)
+                    if start < end:
+                        image_map[idx] = geometric_imgs[start:end]
 
             st.session_state.questions = questions
             st.session_state.images = all_images
@@ -559,7 +536,6 @@ elif not st.session_state.finished:
     q_idx = st.session_state.current_q
     q = questions[q_idx]
 
-    # Yuqori panel
     h1, h2, h3 = st.columns([2, 3, 1])
     with h1:
         st.markdown(f"### 👤 {st.session_state.name} {st.session_state.surname}")
@@ -568,26 +544,21 @@ elif not st.session_state.finished:
         st.progress(answered / total_q, text=f"Javob berilgan: {answered}/{total_q}")
     with h3:
         tcls = "timer-urgent" if remaining < 60 else "timer-box"
-        st.markdown(f'<div class="{tcls}">⏱ {fmt_time(remaining)}</div>',
-                    unsafe_allow_html=True)
+        st.markdown(f'<div class="{tcls}">⏱ {fmt_time(remaining)}</div>', unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown(f"### Savol {q_idx + 1} / {total_q}")
 
-    # ✅ SAVOL MATNI - TEKSHIRILDI
     q_num = q.get('number', q_idx + 1)
     q_text = q.get('question', 'Savol topilmadi')
     if q_text:
-        render_math_html(f"<b>{q_num}.</b> {q_text}", font_size="20px")
+        render_math_html(f"{q_num}. {q_text}", font_size="20px")
     else:
         st.warning("Savol matni ko'rinmadi")
 
-    # ✅ RASMLAR - FAQAT BU SAVOLNING RASMLARI
     if q_idx in st.session_state.image_map:
         st.markdown("### 🖼️ Rasm:")
         image_bytes_list = st.session_state.image_map[q_idx]
-        
-        # Rasmlarni 2 ta qatorda ko'rsatish
         cols = st.columns(min(2, len(image_bytes_list)))
         for col_idx, img_bytes in enumerate(image_bytes_list):
             with cols[col_idx % 2]:
@@ -599,31 +570,26 @@ elif not st.session_state.finished:
 
     st.markdown("---")
 
-    # Variantlar
     options = q.get('options', {})
     opt_keys = list(options.keys())
     prev_ans = st.session_state.answers.get(q_idx)
-    prev_idx = opt_keys.index(prev_ans) if prev_ans in opt_keys else None
 
     st.markdown("**Javobingizni tanlang:**")
-    for ki, k in enumerate(opt_keys):
+    for k in opt_keys:
         v = options[k]
         col1, col2 = st.columns([0.08, 0.92])
         with col1:
             checked = (prev_ans == k)
-            if st.button("●" if checked else "○",
-                         key=f"opt_{q_idx}_{k}",
-                         help=k):
+            if st.button("●" if checked else "○", key=f"opt_{q_idx}_{k}", help=k):
                 st.session_state.answers[q_idx] = k
                 st.rerun()
         with col2:
             render_math_html(
-                f"<b>{k})</b> {v}",
+                f"{k}) {v}",
                 font_size="18px",
-                bg="rgba(255,215,0,0.08)" if checked else "transparent"
+                bg="rgba(255,215,0,0.08)" if (prev_ans == k) else "transparent"
             )
 
-    # Navigatsiya
     nav1, nav2, nav3 = st.columns([1, 1, 1])
     with nav1:
         if q_idx > 0 and st.button("⬅️ Oldingi", use_container_width=True):
@@ -638,7 +604,6 @@ elif not st.session_state.finished:
             st.session_state.finished = True
             st.rerun()
 
-    # Mini panel
     st.markdown("---")
     st.markdown("**Savollar paneli** (✓ = javob berilgan):")
     COLS = 10
@@ -675,9 +640,10 @@ else:
 
     color = "#2ECC71" if pct >= 70 else "#E67E22" if pct >= 50 else "#E74C3C"
     st.markdown(
-        f'<div style="background:#333;border-radius:10px;height:20px;margin:10px 0;">'
-        f'<div style="background:{color};width:{pct:.1f}%;height:20px;border-radius:10px;"></div></div>',
-        unsafe_allow_html=True)
+        f'<div style="background:{color}; padding:20px; border-radius:12px; text-align:center; color:white; font-size:24px; font-weight:bold; margin:20px 0;">'
+        f'Natija: {pct:.1f}% — {grade(pct)}</div>',
+        unsafe_allow_html=True
+    )
 
     st.markdown("---")
     st.markdown("### 📋 Batafsil natijalar")
@@ -688,14 +654,14 @@ else:
         icon = "✅" if is_correct else ("❌" if user_ans else "⬜")
 
         with st.expander(f"{icon}  Savol {i+1}  |  Sizning: {user_ans or '—'}  |  To'g'ri: {correct_ans}"):
-            render_math_html(f"<b>Savol:</b> {q['question']}")
+            render_math_html(f"Savol: {q['question']}")
             for k, v in q.get('options', {}).items():
                 if k == correct_ans:
-                    render_math_html(f"✅ <b>{k})</b> {v}", bg="rgba(46,204,113,0.15)")
+                    render_math_html(f"✅ {k}) {v}", bg="rgba(46,204,113,0.15)")
                 elif k == user_ans:
-                    render_math_html(f"❌ <b>{k})</b> {v}", bg="rgba(231,76,60,0.15)")
+                    render_math_html(f"❌ {k}) {v}", bg="rgba(231,76,60,0.15)")
                 else:
-                    render_math_html(f"&nbsp;&nbsp;{k}) {v}", bg="transparent")
+                    render_math_html(f"  {k}) {v}", bg="transparent")
             if q.get('explanation'):
                 st.info(f"💡 **Yechim:** {q['explanation']}")
 
@@ -706,6 +672,6 @@ else:
 
 st.markdown("---")
 st.markdown(
-    "<p style='text-align:center; color:#888; font-size:14px;'>Yaratuvchi: Usmonov Sodiq</p>",
+    "<p style='text-align:center; color:#888; font-size:12px;'>Yaratuvchi: Usmonov Sodiq</p>",
     unsafe_allow_html=True,
 )
