@@ -194,7 +194,7 @@ def omml_to_latex(el) -> str:
 
 # ==================== PARAGRAPH MATN ====================
 def get_para_text(para) -> str:
-    """para.text OMML ni o'tkazib yuboradi — XML ni qo'lda traversal qilish kerak"""
+    """para.text OMML ni o'tkazib yuboradi"""
     parts = []
     for child in para._element:
         ctag = child.tag
@@ -215,54 +215,60 @@ def get_para_text(para) -> str:
     return ''.join(parts)
 
 
-# ==================== RASM TEKSHIRISH ====================
-def is_geometric_image(image_bytes: bytes) -> bool:
-    """Geometrik chizmani yoki diagrammani aniqlab beradi"""
-    try:
-        img = Image.open(io.BytesIO(image_bytes))
-        arr = np.array(img.convert('RGB'))
-        
-        # Kam rang = chizma yoki diagramma
-        unique_colors = len(np.unique(arr.reshape(-1, 3), axis=0))
-        is_simple = unique_colors < 100
-        
-        # Kichik o'lcham = chizma
-        is_small = img.size[0] * img.size[1] < 500000
-        
-        return is_simple or is_small
-    except:
-        return False
+# ==================== RASM TAHLILI ====================
+def is_geometric_image(img_array) -> bool:
+    """Chizma yoki diagrama ekanligini aniqlash"""
+    if len(img_array.shape) == 3:
+        gray = np.mean(img_array, axis=2)
+    else:
+        gray = img_array
+    
+    # Rang soni - kam bo'lsa chizma
+    unique_colors = len(np.unique(gray))
+    
+    # Qora fonda yozuvlar - chizma belgisi
+    dark_pixels = np.sum(gray < 100) / gray.size
+    
+    return unique_colors < 100 or dark_pixels > 0.3
 
 
-# ==================== COHERE RASM TAHLILI ====================
-def analyze_image_with_cohere(image_bytes: bytes) -> dict:
-    """Cohere bilan rasmni tahlil qilish"""
+def analyze_image_with_cohere(img_bytes: bytes) -> str:
+    """Cohere Vision bilan rasmni tahlil qilish"""
     if not COHERE_API_KEY:
-        return {'description': 'Rasm: tahlil qilinmadi (API key yo\'q)', 'elements': []}
+        return "Rasmni tahlil qilish kerak lekin API key yo'q"
     
     try:
-        co = cohere.ClientV2(api_key=COHERE_API_KEY)
-        b64_image = base64.b64encode(image_bytes).decode('utf-8')
+        client = cohere.ClientV2(api_key=COHERE_API_KEY)
         
-        response = co.chat(
-            model="command-r-plus",
-            messages=[{
-                "role": "user",
-                "content": "Bu rasm nima? Geometrik shakllar, formulalar, diagrammalar mavjudmi? Qisqacha ta'rif ber.",
-            }],
-            documents=[{
-                "id": "image_1",
-                "data": {
-                    "type": "image",
-                    "data": b64_image,
+        # Rasmni base64 ga o'girish
+        img_base64 = base64.b64encode(img_bytes).decode('utf-8')
+        
+        response = client.chat(
+            model="command-r-plus-vision",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": img_base64,
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": "Bu rasm nima? Geometrik shakllar, formulalar, chizmalar bo'lsa tavsilabi. Faqat tavsif ber, boshqa narsa yozma. O'zbek tilida yoz."
+                        }
+                    ],
                 }
-            }]
+            ],
         )
         
-        description = response.message.content[0].text if response.message.content else "Rasm"
-        return {'description': description, 'elements': [description]}
+        return response.message.content[0].text if response.message.content else "Rasm tahlil qilinmadi"
     except Exception as e:
-        return {'description': f'Rasm tahlili xatosi: {str(e)[:50]}', 'elements': []}
+        return f"Xatolik: {str(e)}"
 
 
 # ==================== FAYL O'QISH ====================
@@ -287,17 +293,20 @@ def extract_docx(file_bytes: bytes) -> dict:
         for rel in doc.part.rels.values():
             if "image" in rel.target_ref:
                 try:
-                    blob = rel.target_part.blob
-                    images.append({'bytes': blob, 'is_geometric': is_geometric_image(blob)})
+                    ext = rel.target_ref.split('.')[-1].lower()
+                    mime = f"image/{'jpeg' if ext in ('jpg','jpeg') else ext}"
+                    img_bytes = rel.target_part.blob
+                    images.append({'bytes': img_bytes, 'mime': mime})
                 except Exception: pass
 
         final = '\n\n'.join(lines)
         if not final.strip():
-            res   = mammoth.convert_to_html(io.BytesIO(file_bytes))
+            res = mammoth.convert_to_html(io.BytesIO(file_bytes))
             final = BeautifulSoup(res.value,'html.parser').get_text('\n',strip=True)
         return {'text': final, 'images': images}
     except Exception as e:
-        st.error(f"Word xatolik: {e}"); return {'text':'','images':[]}
+        st.error(f"Word xatolik: {e}")
+        return {'text':'','images':[]}
 
 
 def extract_pdf(file_bytes: bytes) -> dict:
@@ -305,53 +314,67 @@ def extract_pdf(file_bytes: bytes) -> dict:
         r = PyPDF2.PdfReader(io.BytesIO(file_bytes))
         return {'text':'\n\n'.join(p.extract_text() or '' for p in r.pages),'images':[]}
     except Exception as e:
-        st.error(f"PDF xatolik: {e}"); return {'text':'','images':[]}
+        st.error(f"PDF xatolik: {e}")
+        return {'text':'','images':[]}
 
 
 # ==================== JSON TUZATISH ====================
 def fix_json_escapes(raw: str) -> str:
     """JSON string ichidagi yaroqsiz LaTeX backslash larni tuzatish"""
-    VALID = set(r'"\\bfnrtu' + '"')
+    VALID = set(r'"\\bfnrtu/')
     result, in_str, esc = [], False, False
     for ch in raw:
         if esc:
             if in_str and ch not in VALID:
                 result.append('\\')
-            result.append(ch); esc = False; continue
-        if ch == '\\': esc = True; result.append(ch); continue
-        if ch == '"': in_str = not in_str
+            result.append(ch)
+            esc = False
+            continue
+        if ch == '\\':
+            esc = True
+            result.append(ch)
+            continue
+        if ch == '"':
+            in_str = not in_str
         result.append(ch)
     return ''.join(result)
+
 
 def safe_json(text: str):
     for fn in [json.loads,
                lambda t: json.loads(fix_json_escapes(t)),
-               lambda t: json.loads(re.sub(r'\\(?!["\\\\/bfnrtu])', r'\\\\', t))]:
-        try: return fn(text)
-        except: pass
+               lambda t: json.loads(re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', t))]:
+        try:
+            return fn(text)
+        except:
+            pass
     return None
 
 
 # ==================== AI TAHLIL ====================
-def parse_questions_with_ai(text: str, image_data: list = None) -> list:
+def parse_questions_with_ai(text: str, image_bytes_list: list) -> list:
     if not GROQ_API_KEY:
-        st.error("⚠️ GROQ_API_KEY topilmadi."); return []
+        st.error("⚠️ GROQ_API_KEY topilmadi.")
+        return []
+
+    # Rasmlarni tahlil qilish
+    image_descriptions = ""
+    if image_bytes_list:
+        with st.spinner("🖼️ Rasmlar tahlil qilinmoqda..."):
+            for idx, img_bytes in enumerate(image_bytes_list):
+                try:
+                    img_array = np.array(Image.open(io.BytesIO(img_bytes)))
+                    if is_geometric_image(img_array):
+                        desc = analyze_image_with_cohere(img_bytes)
+                        image_descriptions += f"\n\n📸 Geometrik Rasm {idx+1}: {desc}"
+                except Exception as e:
+                    pass
 
     client = Groq(api_key=GROQ_API_KEY)
 
-    # Rasmlar tahlili
-    image_descriptions = ""
-    if image_data:
-        st.info("🖼️ Rasmlar tahlil qilinmoqda...")
-        for idx, img_info in enumerate(image_data):
-            if img_info.get('is_geometric'):
-                analysis = analyze_image_with_cohere(img_info['bytes'])
-                desc = analysis.get('description', '')
-                image_descriptions += f"\n\n📸 Geometrik Rasm {idx+1}: {desc}"
-
-    lines       = [l.strip() for l in text.split('\n') if l.strip()]
-    num_approx  = sum(1 for l in lines if re.match(r'^\d+[\.\)]\s', l))
-    num_ask     = max(num_approx, 5) if num_approx else 10
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+    num_approx = sum(1 for l in lines if re.match(r'^\d+[\.\)]\s', l))
+    num_ask = max(num_approx, 5) if num_approx else 10
 
     prompt = f"""Bu olimpiada test savollari. Barcha {num_ask} ta savolni ajratib ol.
 
@@ -362,7 +385,6 @@ MUHIM QOIDALAR:
 4. To'g'ri javobni belgilamoq kerak.
 5. JSON string ichida backslash: \\\\ (ikkita) bo'lsin.
 6. Faqat JSON massivi qaytar — boshqa hech narsa yozma.
-7. FAQAT MATEMATIK savollar qo'shish.
 
 [
   {{
@@ -374,32 +396,34 @@ MUHIM QOIDALAR:
   }}
 ]
 
-RASMLAR:
-{image_descriptions}
-
 MATN:
-{text[:9000]}"""
+{text[:9000]}
+
+{image_descriptions}"""
 
     try:
-        resp    = client.chat.completions.create(
+        resp = client.chat.completions.create(
             model='llama-3.3-70b-versatile',
             messages=[{'role':'user','content':prompt}],
-            temperature=0.1, max_tokens=4096,
+            temperature=0.1,
+            max_tokens=4096,
         )
         content = resp.choices[0].message.content.strip()
         content = re.sub(r'```(?:json)?\s*','',content).strip().rstrip('`').strip()
 
         m = re.search(r'\[.*\]', content, re.DOTALL)
         if not m:
-            st.warning("JSON topilmadi:\n" + content[:400]); return []
+            st.warning("JSON topilmadi")
+            return []
 
         result = safe_json(m.group())
         if result is None:
-            st.error("JSON parse muvaffaqiyatsiz:")
-            st.code(m.group()[:600]); return []
+            st.error("JSON parse muvaffaqiyatsiz")
+            return []
         return result
     except Exception as e:
-        st.error(f"AI xatosi: {e}"); return []
+        st.error(f"AI xatosi: {e}")
+        return []
 
 
 # ==================== YORDAMCHILAR ====================
@@ -409,12 +433,11 @@ def grade(pct):
     if pct>=50: return "3 — Qoniqarli"
     return "2 — Qoniqarsiz"
 
-def fmt_time(sec):
-    h,r = divmod(sec,3600); m,s = divmod(r,60)
-    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
-def html_escape(t):
-    return t.replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
+def fmt_time(sec):
+    h, r = divmod(sec, 3600)
+    m, s = divmod(r, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
 # ==================== SESSION STATE ====================
@@ -425,14 +448,15 @@ DEFAULTS = {
     'duration':90,'start_time':None,
     'uploaded_files':[],'images':[],
 }
-for k,v in DEFAULTS.items():
-    if k not in st.session_state: st.session_state[k]=v
+for k, v in DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 
 # ==================== SIDEBAR ====================
 with st.sidebar:
     st.markdown("### 👤 Foydalanuvchi")
-    st.session_state.name    = st.text_input("Ism",      st.session_state.name)
+    st.session_state.name = st.text_input("Ism", st.session_state.name)
     st.session_state.surname = st.text_input("Familiya", st.session_state.surname)
 
     st.markdown("---")
@@ -445,12 +469,14 @@ with st.sidebar:
                                 type=["docx","pdf"], accept_multiple_files=True)
     if uploaded:
         st.session_state.uploaded_files = uploaded
-        for f in uploaded: st.success(f"✅ {f.name}")
+        for f in uploaded:
+            st.success(f"✅ {f.name}")
 
     if st.session_state.started and not st.session_state.finished:
         st.markdown("---")
         if st.button("⛔ Testni to'xtatish", use_container_width=True):
-            st.session_state.finished = True; st.rerun()
+            st.session_state.finished = True
+            st.rerun()
 
 
 # ==================== ASOSIY SAHIFA ====================
@@ -467,46 +493,39 @@ if not st.session_state.started:
         <li>Ism-familiyangizni kiriting</li>
         <li>Word (.docx) yoki PDF fayl yuklang</li>
         <li>Vaqt belgilang va "Testni boshlash" tugmasini bosing</li>
-        <li><b>Matematik formulalar avtomatik aniqlanadi va chiroyli ko'rinadi</b></li>
-        <li><b>Geometrik rasmlar avtomatik tahlil qilinadi</b></li>
+        <li><b>Matematik formulalar va rasmlar avtomatik aniqlanadi</b></li>
     </ul>
     </div>
     """, unsafe_allow_html=True)
 
     if st.session_state.uploaded_files and st.session_state.name.strip():
-        debug_mode = st.checkbox("🔍 Debug: fayldan o'qilgan matnni ko'rish")
-
         if st.button("🚀 Testni boshlash", type="primary", use_container_width=True):
             with st.spinner("📖 Fayl o'qilmoqda..."):
                 all_text, all_images = "", []
                 for f in st.session_state.uploaded_files:
-                    raw  = f.read()
+                    raw = f.read()
                     data = extract_docx(raw) if f.name.lower().endswith('.docx') else extract_pdf(raw)
-                    all_text   += data['text'] + '\n\n'
-                    all_images += data.get('images',[])
-
-            if debug_mode:
-                st.subheader("O'qilgan matn (debug):")
-                st.text_area("", all_text[:5000], height=400)
-                st.info("Debug: test boshlanmadi. Checkboxni olib tashlang.")
-                st.stop()
+                    all_text += data['text'] + '\n\n'
+                    all_images += data.get('images', [])
 
             if not all_text.strip():
-                st.error("❌ Fayldan matn olinmadi."); st.stop()
+                st.error("❌ Fayldan matn olinmadi.")
+                st.stop()
 
-            with st.spinner("🤖 AI savollarni tahlil qilmoqda (rasmlar ham)..."):
+            with st.spinner("🤖 AI savollarni tahlil qilmoqda..."):
                 image_bytes_list = [img['bytes'] for img in all_images]
-                questions = parse_questions_with_ai(all_text, all_images if all_images else None)
+                questions = parse_questions_with_ai(all_text, image_bytes_list)
 
             if not questions:
-                st.error("❌ Savollar tahlil qilinmadi."); st.stop()
+                st.error("❌ Savollar tahlil qilinmadi.")
+                st.stop()
 
-            st.session_state.questions  = questions
-            st.session_state.images     = all_images
-            st.session_state.started    = True
+            st.session_state.questions = questions
+            st.session_state.images = all_images
+            st.session_state.started = True
             st.session_state.start_time = time.time()
-            st.session_state.current_q  = 0
-            st.session_state.answers    = {}
+            st.session_state.current_q = 0
+            st.session_state.answers = {}
             st.rerun()
     else:
         if not st.session_state.name.strip():
@@ -516,15 +535,16 @@ if not st.session_state.started:
 
 # ─── TEST ─────────────────────────────────────────────
 elif not st.session_state.finished:
-    elapsed   = time.time() - st.session_state.start_time
+    elapsed = time.time() - st.session_state.start_time
     remaining = max(0, int(st.session_state.duration * 60 - elapsed))
     if remaining == 0:
-        st.session_state.finished = True; st.rerun()
+        st.session_state.finished = True
+        st.rerun()
 
     questions = st.session_state.questions
-    total_q   = len(questions)
-    q_idx     = st.session_state.current_q
-    q         = questions[q_idx]
+    total_q = len(questions)
+    q_idx = st.session_state.current_q
+    q = questions[q_idx]
 
     # Yuqori panel
     h1, h2, h3 = st.columns([2, 3, 1])
@@ -541,20 +561,20 @@ elif not st.session_state.finished:
     st.markdown("---")
     st.markdown(f"### Savol {q_idx + 1} / {total_q}")
 
-    # ── Savol matni — KaTeX bilan render ──
-    q_num  = q.get('number', q_idx + 1)
+    # Savol matni — KaTeX bilan render
+    q_num = q.get('number', q_idx + 1)
     q_text = q.get('question', '')
     render_math_html(f"<b>{q_num}.</b> {q_text}", font_size="20px")
 
-    # ── Variantlar ──
-    options  = q.get('options', {})
+    # Variantlar
+    options = q.get('options', {})
     opt_keys = list(options.keys())
     prev_ans = st.session_state.answers.get(q_idx)
     prev_idx = opt_keys.index(prev_ans) if prev_ans in opt_keys else None
 
     st.markdown("**Javobingizni tanlang:**")
     for ki, k in enumerate(opt_keys):
-        v   = options[k]
+        v = options[k]
         col1, col2 = st.columns([0.08, 0.92])
         with col1:
             checked = (prev_ans == k)
@@ -570,52 +590,57 @@ elif not st.session_state.finished:
                 bg="rgba(255,215,0,0.08)" if checked else "transparent"
             )
 
-    # ── Navigatsiya ──
+    # Navigatsiya
     nav1, nav2, nav3 = st.columns([1, 1, 1])
     with nav1:
         if q_idx > 0 and st.button("⬅️ Oldingi", use_container_width=True):
-            st.session_state.current_q -= 1; st.rerun()
+            st.session_state.current_q -= 1
+            st.rerun()
     with nav2:
         if q_idx < total_q - 1 and st.button("Keyingi ➡️", use_container_width=True):
-            st.session_state.current_q += 1; st.rerun()
+            st.session_state.current_q += 1
+            st.rerun()
     with nav3:
         if st.button("✅ Yakunlash", type="primary", use_container_width=True):
-            st.session_state.finished = True; st.rerun()
+            st.session_state.finished = True
+            st.rerun()
 
-    # ── Mini panel ──
+    # Mini panel
     st.markdown("---")
     st.markdown("**Savollar paneli** (✓ = javob berilgan):")
     COLS = 10
     for rs in range(0, total_q, COLS):
         row_qs = list(range(rs, min(rs + COLS, total_q)))
-        cols   = st.columns(len(row_qs))
+        cols = st.columns(len(row_qs))
         for col, i in zip(cols, row_qs):
             with col:
-                lbl  = f"✓{i+1}" if i in st.session_state.answers else str(i+1)
+                lbl = f"✓{i+1}" if i in st.session_state.answers else str(i+1)
                 btyp = "primary" if i == q_idx else "secondary"
                 if st.button(lbl, key=f"nav_{i}", type=btyp, use_container_width=True):
-                    st.session_state.current_q = i; st.rerun()
+                    st.session_state.current_q = i
+                    st.rerun()
 
-    time.sleep(1); st.rerun()
+    time.sleep(1)
+    st.rerun()
 
 # ─── NATIJA ───────────────────────────────────────────
 else:
     questions = st.session_state.questions
-    total_q   = len(questions)
-    correct   = sum(1 for i,q in enumerate(questions)
-                    if st.session_state.answers.get(i) == q.get('correct'))
-    pct = (correct/total_q*100) if total_q else 0.0
+    total_q = len(questions)
+    correct = sum(1 for i, q in enumerate(questions)
+                  if st.session_state.answers.get(i) == q.get('correct'))
+    pct = (correct / total_q * 100) if total_q else 0.0
 
     st.markdown("## 🎉 Test yakunlandi!")
     st.markdown(f"**{st.session_state.name} {st.session_state.surname}**")
 
-    c1,c2,c3,c4 = st.columns(4)
-    c1.metric("✅ To'g'ri",   f"{correct}/{total_q}")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("✅ To'g'ri", f"{correct}/{total_q}")
     c2.metric("❌ Noto'g'ri", f"{total_q-correct}/{total_q}")
-    c3.metric("📊 Foiz",      f"{pct:.1f}%")
-    c4.metric("🎓 Baho",      grade(pct))
+    c3.metric("📊 Foiz", f"{pct:.1f}%")
+    c4.metric("🎓 Baho", grade(pct))
 
-    color = "#2ECC71" if pct>=70 else "#E67E22" if pct>=50 else "#E74C3C"
+    color = "#2ECC71" if pct >= 70 else "#E67E22" if pct >= 50 else "#E74C3C"
     st.markdown(
         f'<div style="background:#333;border-radius:10px;height:20px;margin:10px 0;">'
         f'<div style="background:{color};width:{pct:.1f}%;height:20px;border-radius:10px;"></div></div>',
@@ -623,15 +648,15 @@ else:
 
     st.markdown("---")
     st.markdown("### 📋 Batafsil natijalar")
-    for i,q in enumerate(questions):
-        user_ans    = st.session_state.answers.get(i)
-        correct_ans = q.get('correct','?')
-        is_correct  = user_ans == correct_ans
-        icon        = "✅" if is_correct else ("❌" if user_ans else "⬜")
+    for i, q in enumerate(questions):
+        user_ans = st.session_state.answers.get(i)
+        correct_ans = q.get('correct', '?')
+        is_correct = user_ans == correct_ans
+        icon = "✅" if is_correct else ("❌" if user_ans else "⬜")
 
         with st.expander(f"{icon}  Savol {i+1}  |  Sizning: {user_ans or '—'}  |  To'g'ri: {correct_ans}"):
             render_math_html(f"<b>Savol:</b> {q['question']}")
-            for k,v in q.get('options',{}).items():
+            for k, v in q.get('options', {}).items():
                 if k == correct_ans:
                     render_math_html(f"✅ <b>{k})</b> {v}", bg="rgba(46,204,113,0.15)")
                 elif k == user_ans:
@@ -642,7 +667,8 @@ else:
                 st.info(f"💡 **Yechim:** {q['explanation']}")
 
     if st.button("🔄 Yangi test", type="primary", use_container_width=True):
-        for k in list(st.session_state.keys()): del st.session_state[k]
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
         st.rerun()
 
 st.markdown("---")
