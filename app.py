@@ -1,5 +1,6 @@
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_autorefresh import st_autorefresh  # BUG-FIX: sleep+rerun o'rniga
 import os, re, io, json, base64, time
 from groq import Groq
 import cohere
@@ -10,668 +11,631 @@ from bs4 import BeautifulSoup
 from PIL import Image
 import numpy as np
 
-# ==================== SOZLAMALAR ====================
-st.set_page_config(
-    page_title="OlimpTest - Matematika",
-    page_icon="🏆",
-    layout="wide",
-)
+st.set_page_config(page_title="OlimpTest - Matematika", page_icon="🏆", layout="wide")
 
-GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY", ""))
-COHERE_API_KEY = st.secrets.get("COHERE_API_KEY", os.getenv("COHERE_API_KEY", ""))
+GROQ_API_KEY   = st.secrets.get("GROQ_API_KEY",   os.getenv("GROQ_API_KEY",   ""))
+COHERE_API_KEY = st.secrets.get("COHERE_API_KEY",  os.getenv("COHERE_API_KEY", ""))
 
-# ==================== STIL ====================
 st.markdown("""
 <style>
-    .stApp { background: linear-gradient(135deg, #0f0f23 0%, #1a1a3e 100%); }
-    h1,h2,h3 { color: #FFD700 !important; }
-    p, li, label { color: #E0E0E0 !important; }
-    .stButton>button {
-        background: linear-gradient(90deg,#FF8C00,#FFA500);
-        color:white; border:none; border-radius:10px;
-        font-weight:bold; padding:10px 20px;
-    }
-    .timer-box {
-        background: linear-gradient(90deg,#FF4500,#FF8C00);
-        padding:15px 25px; border-radius:12px;
-        color:white; font-size:24px; font-weight:bold; text-align:center;
-    }
-    .timer-urgent {
-        background: linear-gradient(90deg,#8B0000,#FF0000);
-        padding:15px 25px; border-radius:12px;
-        color:white; font-size:24px; font-weight:bold; text-align:center;
-    }
-    .result-correct { color:#2ECC71; font-weight:bold; }
-    .result-wrong   { color:#E74C3C; font-weight:bold; }
-    .image-container { border: 2px solid rgba(255,215,0,0.3); border-radius: 10px; padding: 10px; }
+    .stApp{background:linear-gradient(135deg,#0f0f23 0%,#1a1a3e 100%);}
+    h1,h2,h3{color:#FFD700!important;}
+    p,li,label{color:#E0E0E0!important;}
+    .stButton>button{background:linear-gradient(90deg,#FF8C00,#FFA500);
+        color:white;border:none;border-radius:10px;font-weight:bold;padding:10px 20px;}
+    .timer-box{background:linear-gradient(90deg,#FF4500,#FF8C00);
+        padding:15px 25px;border-radius:12px;color:white;font-size:24px;font-weight:bold;text-align:center;}
+    .timer-urgent{background:linear-gradient(90deg,#8B0000,#FF0000);
+        padding:15px 25px;border-radius:12px;color:white;font-size:24px;font-weight:bold;text-align:center;
+        animation:blink 1s infinite;}
+    @keyframes blink{0%,100%{opacity:1}50%{opacity:.6}}
 </style>
 """, unsafe_allow_html=True)
 
 
-# ==================== MATH RENDER (KaTeX) ====================
-def render_math_html(text: str, font_size: str = "20px", bg: str = "rgba(255,255,255,0.05)") -> None:
-    """KaTeX bilan formulalarni to'g'ri render qilish."""
-    html = f"""
-<!DOCTYPE html>
-<html>
-<head>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"
-    onload="renderMathInElement(document.body, {{
-      delimiters: [
-        {{left:'$$', right:'$$', display:true}},
-        {{left:'$',  right:'$',  display:false}}
-      ],
-      throwOnError: false
-    }});"></script>
-</head>
-<body style="background:{bg}; color:#E0E0E0; font-size:{font_size}; padding:10px; border-radius:8px; font-family:sans-serif;">
-{text}
-</body>
-</html>
-"""
-    height = max(80, min(400, 80 + len(text) // 3))
+# ──────────── KaTeX render ────────────
+def render_math_html(text:str, font_size:str="20px", bg:str="rgba(255,255,255,0.05)"):
+    lines  = text.count('<br') + text.count('\n') + 1
+    height = max(70, min(600, lines*36 + len(text)//5))
+    html = f"""<!DOCTYPE html><html><head>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{{delimiters:[
+    {{left:'$$',right:'$$',display:true}},
+    {{left:'$',right:'$',display:false}}
+  ],throwOnError:false}});"></script>
+<style>
+body{{background:{bg};color:#E0E0E0;font-size:{font_size};font-family:sans-serif;
+     padding:12px 16px;border-radius:10px;border:1px solid rgba(255,215,0,0.2);margin:0;}}
+.katex,.katex-display{{color:#FFD700;}}
+</style></head><body>{text}</body></html>"""
     components.html(html, height=height, scrolling=False)
 
 
-# ==================== OMML → LaTeX ====================
+# ──────────── OMML → LaTeX ────────────
 MN = '{http://schemas.openxmlformats.org/officeDocument/2006/math}'
 WN = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
-
-NARY_OPS = {'\u222b':'\\int','\u222c':'\\iint','\u222d':'\\iiint',
-            '\u2211':'\\sum','\u220f':'\\prod','\u222e':'\\oint'}
+NARY_OPS  = {'\u222b':'\\int','\u222c':'\\iint','\u222d':'\\iiint',
+              '\u2211':'\\sum','\u220f':'\\prod','\u222e':'\\oint'}
 PROP_TAGS = {'rPr','fPr','radPr','naryPr','dPr','sSupPr','sSubPr','sSubSupPr',
-             'funcPr','sPr','limLowPr','limUppPr','eqArrPr','mPr','ctrlPr',
-             'groupChrPr','borderBoxPr','barPr','accPr','phantPr','boxPr'}
-FN_MAP = {'sin':'\\sin','cos':'\\cos','tan':'\\tan','cot':'\\cot',
-          'sec':'\\sec','csc':'\\csc','log':'\\log','ln':'\\ln',
-          'exp':'\\exp','lim':'\\lim','max':'\\max','min':'\\min',
-          'det':'\\det','gcd':'\\gcd'}
-ACC_MAP = {'\u0302':'\\hat','\u0303':'\\tilde','\u0307':'\\dot',
-           '\u0308':'\\ddot','\u0305':'\\bar','\u20d7':'\\vec'}
+              'funcPr','sPr','limLowPr','limUppPr','eqArrPr','mPr','ctrlPr',
+              'groupChrPr','borderBoxPr','barPr','accPr','phantPr','boxPr'}
+FN_MAP    = {'sin':'\\sin','cos':'\\cos','tan':'\\tan','cot':'\\cot',
+              'sec':'\\sec','csc':'\\csc','log':'\\log','ln':'\\ln',
+              'exp':'\\exp','lim':'\\lim','max':'\\max','min':'\\min','det':'\\det','gcd':'\\gcd'}
+ACC_MAP   = {'\u0302':'\\hat','\u0303':'\\tilde','\u0307':'\\dot',
+              '\u0308':'\\ddot','\u0305':'\\bar','\u20d7':'\\vec'}
 
-
-def omml_to_latex(el) -> str:
-    tag = el.tag.replace(MN,'').replace(WN,'')
+def omml_to_latex(el)->str:
+    tag=el.tag.replace(MN,'').replace(WN,'')
     if tag in PROP_TAGS: return ''
     if tag in ('oMath','oMathPara','e','num','den','fName','lim','sub','sup','deg'):
         return ''.join(omml_to_latex(c) for c in el)
-    if tag == 'r':
-        return ''.join(t.text or '' for t in el.findall(f'{MN}t'))
-    if tag == 't':
-        return el.text or ''
-    if tag == 'f':
-        n = omml_to_latex(el.find(f'{MN}num')) if el.find(f'{MN}num') is not None else ''
-        d = omml_to_latex(el.find(f'{MN}den')) if el.find(f'{MN}den') is not None else ''
+    if tag=='r': return ''.join(t.text or '' for t in el.findall(f'{MN}t'))
+    if tag=='t': return el.text or ''
+    if tag=='f':
+        n=omml_to_latex(el.find(f'{MN}num')) if el.find(f'{MN}num') is not None else ''
+        d=omml_to_latex(el.find(f'{MN}den')) if el.find(f'{MN}den') is not None else ''
         return f'\\frac{{{n}}}{{{d}}}'
-    if tag == 'rad':
-        pr = el.find(f'{MN}radPr'); deg_el = el.find(f'{MN}deg'); e_el = el.find(f'{MN}e')
-        hide = False
+    if tag=='rad':
+        pr=el.find(f'{MN}radPr');deg_el=el.find(f'{MN}deg');e_el=el.find(f'{MN}e')
+        hide=False
         if pr is not None:
-            dh = pr.find(f'{MN}degHide')
-            if dh is not None: hide = dh.get(f'{MN}val','1') != '0'
-        deg = omml_to_latex(deg_el).strip() if deg_el is not None else ''
-        e   = omml_to_latex(e_el).strip()   if e_el   is not None else ''
+            dh=pr.find(f'{MN}degHide')
+            if dh is not None: hide=dh.get(f'{MN}val','1')!='0'
+        deg=omml_to_latex(deg_el).strip() if deg_el is not None else ''
+        e=omml_to_latex(e_el).strip() if e_el is not None else ''
         return f'\\sqrt{{{e}}}' if (hide or not deg) else f'\\sqrt[{deg}]{{{e}}}'
-    if tag == 'sSup':
-        b = omml_to_latex(el.find(f'{MN}e'))   if el.find(f'{MN}e')   is not None else ''
-        s = omml_to_latex(el.find(f'{MN}sup')) if el.find(f'{MN}sup') is not None else ''
+    if tag=='sSup':
+        b=omml_to_latex(el.find(f'{MN}e')) if el.find(f'{MN}e') is not None else ''
+        s=omml_to_latex(el.find(f'{MN}sup')) if el.find(f'{MN}sup') is not None else ''
         return f'{{{b}}}^{{{s}}}'
-    if tag == 'sSub':
-        b = omml_to_latex(el.find(f'{MN}e'))   if el.find(f'{MN}e')   is not None else ''
-        s = omml_to_latex(el.find(f'{MN}sub')) if el.find(f'{MN}sub') is not None else ''
+    if tag=='sSub':
+        b=omml_to_latex(el.find(f'{MN}e')) if el.find(f'{MN}e') is not None else ''
+        s=omml_to_latex(el.find(f'{MN}sub')) if el.find(f'{MN}sub') is not None else ''
         return f'{{{b}}}_{{{s}}}'
-    if tag == 'sSubSup':
-        b = omml_to_latex(el.find(f'{MN}e'))   if el.find(f'{MN}e')   is not None else ''
-        s = omml_to_latex(el.find(f'{MN}sub')) if el.find(f'{MN}sub') is not None else ''
-        p = omml_to_latex(el.find(f'{MN}sup')) if el.find(f'{MN}sup') is not None else ''
+    if tag=='sSubSup':
+        b=omml_to_latex(el.find(f'{MN}e')) if el.find(f'{MN}e') is not None else ''
+        s=omml_to_latex(el.find(f'{MN}sub')) if el.find(f'{MN}sub') is not None else ''
+        p=omml_to_latex(el.find(f'{MN}sup')) if el.find(f'{MN}sup') is not None else ''
         return f'{{{b}}}_{{{s}}}^{{{p}}}'
-    if tag == 'nary':
-        pr = el.find(f'{MN}naryPr'); op = '\\sum'
+    if tag=='nary':
+        pr=el.find(f'{MN}naryPr');op='\\sum'
         if pr is not None:
-            ch_el = pr.find(f'{MN}chr')
-            if ch_el is not None: op = NARY_OPS.get(ch_el.get(f'{MN}val',''), '\\sum')
-        lo = omml_to_latex(el.find(f'{MN}sub')) if el.find(f'{MN}sub') is not None else ''
-        hi = omml_to_latex(el.find(f'{MN}sup')) if el.find(f'{MN}sup') is not None else ''
-        bd = omml_to_latex(el.find(f'{MN}e'))   if el.find(f'{MN}e')   is not None else ''
-        res = op
-        if lo: res += f'_{{{lo}}}'
-        if hi: res += f'^{{{hi}}}'
-        return res + f' {bd}'
-    if tag == 'func':
-        f_raw = omml_to_latex(el.find(f'{MN}fName')).strip() if el.find(f'{MN}fName') is not None else ''
-        c     = omml_to_latex(el.find(f'{MN}e')).strip()     if el.find(f'{MN}e')     is not None else ''
-        return f'{FN_MAP.get(f_raw, f_raw)}\\left({c}\\right)'
-    if tag == 'd':
-        pr = el.find(f'{MN}dPr')
-        left,right = '(',')'
+            ch_el=pr.find(f'{MN}chr')
+            if ch_el is not None: op=NARY_OPS.get(ch_el.get(f'{MN}val',''),'\\sum')
+        lo=omml_to_latex(el.find(f'{MN}sub')) if el.find(f'{MN}sub') is not None else ''
+        hi=omml_to_latex(el.find(f'{MN}sup')) if el.find(f'{MN}sup') is not None else ''
+        bd=omml_to_latex(el.find(f'{MN}e')) if el.find(f'{MN}e') is not None else ''
+        res=op
+        if lo: res+=f'_{{{lo}}}'
+        if hi: res+=f'^{{{hi}}}'
+        return res+f' {bd}'
+    if tag=='func':
+        f_raw=omml_to_latex(el.find(f'{MN}fName')).strip() if el.find(f'{MN}fName') is not None else ''
+        c=omml_to_latex(el.find(f'{MN}e')).strip() if el.find(f'{MN}e') is not None else ''
+        return f'{FN_MAP.get(f_raw,f_raw)}\\left({c}\\right)'
+    if tag=='d':
+        pr=el.find(f'{MN}dPr');left,right='(',')'
         if pr is not None:
-            beg = pr.find(f'{MN}begChr'); end = pr.find(f'{MN}endChr')
-            if beg is not None: left  = beg.get(f'{MN}val','(') or '.'
-            if end is not None: right = end.get(f'{MN}val',')') or '.'
-        inner = ''.join(omml_to_latex(c) for c in el if c.tag != f'{MN}dPr')
+            beg=pr.find(f'{MN}begChr');end=pr.find(f'{MN}endChr')
+            if beg is not None: left=beg.get(f'{MN}val','(') or '.'
+            if end is not None: right=end.get(f'{MN}val',')') or '.'
+        inner=''.join(omml_to_latex(c) for c in el if c.tag!=f'{MN}dPr')
         return f'\\left{left}{inner}\\right{right}'
-    if tag == 'm':
-        rows = el.findall(f'{MN}mr')
-        lr = [' & '.join(omml_to_latex(c) for c in r.findall(f'{MN}e')) for r in rows]
-        return '\\begin{pmatrix}' + ' \\\\ '.join(lr) + '\\end{pmatrix}'
-    if tag == 'limLow':
-        b = omml_to_latex(el.find(f'{MN}e'))   if el.find(f'{MN}e')   is not None else ''
-        l = omml_to_latex(el.find(f'{MN}lim')) if el.find(f'{MN}lim') is not None else ''
+    if tag=='m':
+        rows=el.findall(f'{MN}mr')
+        lr=[' & '.join(omml_to_latex(c) for c in r.findall(f'{MN}e')) for r in rows]
+        return '\\begin{pmatrix}'+'\\\\'.join(lr)+'\\end{pmatrix}'
+    if tag=='limLow':
+        b=omml_to_latex(el.find(f'{MN}e')) if el.find(f'{MN}e') is not None else ''
+        l=omml_to_latex(el.find(f'{MN}lim')) if el.find(f'{MN}lim') is not None else ''
         return f'{b}_{{{l}}}'
-    if tag == 'limUpp':
-        b = omml_to_latex(el.find(f'{MN}e'))   if el.find(f'{MN}e')   is not None else ''
-        l = omml_to_latex(el.find(f'{MN}lim')) if el.find(f'{MN}lim') is not None else ''
+    if tag=='limUpp':
+        b=omml_to_latex(el.find(f'{MN}e')) if el.find(f'{MN}e') is not None else ''
+        l=omml_to_latex(el.find(f'{MN}lim')) if el.find(f'{MN}lim') is not None else ''
         return f'{b}^{{{l}}}'
-    if tag == 'acc':
-        pr = el.find(f'{MN}accPr'); ch = ''
+    if tag=='acc':
+        pr=el.find(f'{MN}accPr');ch=''
         if pr is not None:
-            ch_el = pr.find(f'{MN}chr')
-            if ch_el is not None: ch = ch_el.get(f'{MN}val','')
-        inner = omml_to_latex(el.find(f'{MN}e')) if el.find(f'{MN}e') is not None else ''
+            ch_el=pr.find(f'{MN}chr')
+            if ch_el is not None: ch=ch_el.get(f'{MN}val','')
+        inner=omml_to_latex(el.find(f'{MN}e')) if el.find(f'{MN}e') is not None else ''
         return f'{ACC_MAP.get(ch,"\\hat")}{{{inner}}}'
-    if tag == 'bar':
-        e = el.find(f'{MN}e')
+    if tag=='bar':
+        e=el.find(f'{MN}e')
         return f'\\overline{{{omml_to_latex(e) if e is not None else ""}}}'
-    if tag == 'eqArr':
-        return '\\begin{cases}' + ' \\\\ '.join(omml_to_latex(r) for r in el.findall(f'{MN}e')) + '\\end{cases}'
+    if tag=='eqArr':
+        return '\\begin{cases}'+'\\\\'.join(omml_to_latex(r) for r in el.findall(f'{MN}e'))+'\\end{cases}'
     return ''.join(omml_to_latex(c) for c in el)
 
-
-# ==================== PARAGRAPH MATN ====================
-def get_para_text(para) -> str:
-    parts = []
+def get_para_text(para)->str:
+    parts=[]
     for child in para._element:
-        ctag = child.tag
-        if ctag == f'{MN}oMathPara':
+        ctag=child.tag
+        if ctag==f'{MN}oMathPara':
             for om in child.findall(f'{MN}oMath'):
-                lat = omml_to_latex(om).strip()
+                lat=omml_to_latex(om).strip()
                 if lat: parts.append(f'$${lat}$$')
-        elif ctag == f'{MN}oMath':
-            lat = omml_to_latex(child).strip()
+        elif ctag==f'{MN}oMath':
+            lat=omml_to_latex(child).strip()
             if lat: parts.append(f'${lat}$')
-        elif ctag == f'{WN}r':
+        elif ctag==f'{WN}r':
             for t in child.findall(f'{WN}t'):
                 if t.text: parts.append(t.text)
-        elif ctag in (f'{WN}ins', f'{WN}hyperlink'):
+        elif ctag in (f'{WN}ins',f'{WN}hyperlink'):
             for r in child.findall(f'.//{WN}r'):
                 for t in r.findall(f'{WN}t'):
                     if t.text: parts.append(t.text)
     return ''.join(parts)
 
 
-# ==================== RASM TAHLILI ====================
-def is_geometric_image(img_array) -> bool:
-    if len(img_array.shape) == 3:
-        gray = np.mean(img_array, axis=2)
-    else:
-        gray = img_array
-    unique_colors = len(np.unique(gray))
-    dark_pixels = np.sum(gray < 100) / gray.size
-    return unique_colors < 100 or dark_pixels > 0.3
+# ──────────── Rasm ────────────
+def is_geometric_image(arr:np.ndarray)->bool:
+    gray=np.mean(arr,axis=2) if arr.ndim==3 else arr
+    return len(np.unique(gray.astype(np.uint8)))<120 or np.sum(gray<100)/gray.size>0.25
 
-
-def analyze_image_with_cohere(img_bytes: bytes) -> str:
-    if not COHERE_API_KEY:
-        return "Rasmni tahlil qilish kerak lekin API key yo'q"
+def analyze_image_with_cohere(img_bytes:bytes)->str:
+    if not COHERE_API_KEY: return "Geometrik rasm"
     try:
-        client = cohere.ClientV2(api_key=COHERE_API_KEY)
-        img_base64 = base64.b64encode(img_bytes).decode('utf-8')
-        response = client.chat(
-            model="command-r-plus-vision",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_base64}},
-                    {"type": "text", "text": "Bu matematika masalasi rasmidir. Geometrik shakl, grafik yoki diagrammani batafsil tasvirla: o'lchamlar, burchaklar, yorliqlar. O'zbek tilida yoz."}
-                ],
-            }],
-        )
-        return response.message.content[0].text if response.message.content else "Rasm tahlil qilinmadi"
+        co=cohere.ClientV2(api_key=COHERE_API_KEY)
+        b64=base64.b64encode(img_bytes).decode()
+        r=co.chat(model="command-r-plus-vision",messages=[{"role":"user","content":[
+            {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":b64}},
+            {"type":"text","text":"Bu matematika masalasi rasmi. Geometrik shakl, o'lcham, burchak, yorliqlarni batafsil O'zbek tilida ta'rifla."}
+        ]}])
+        return r.message.content[0].text if r.message.content else "Tahlil qilinmadi"
     except Exception as e:
-        return f"Xatolik: {str(e)}"
+        return f"Rasm xatosi: {e}"
 
 
-# ==================== FAYL O'QISH ====================
-def extract_docx(file_bytes: bytes) -> dict:
+# ──────────── Fayl o'qish ────────────
+def extract_docx(raw:bytes)->dict:
     try:
-        doc = Document(io.BytesIO(file_bytes))
-        lines, images = [], []
+        doc=Document(io.BytesIO(raw));lines,images=[],[]
         for para in doc.paragraphs:
-            t = get_para_text(para).strip()
+            t=get_para_text(para).strip()
             if t: lines.append(t)
         for table in doc.tables:
             for row in table.rows:
-                row_parts = []
+                parts=[]
                 for cell in row.cells:
-                    ct = ' '.join(get_para_text(p).strip() for p in cell.paragraphs if get_para_text(p).strip())
-                    if ct: row_parts.append(ct)
-                if row_parts: lines.append(' | '.join(row_parts))
+                    ct=' '.join(get_para_text(p).strip() for p in cell.paragraphs if get_para_text(p).strip())
+                    if ct: parts.append(ct)
+                if parts: lines.append(' | '.join(parts))
         for rel in doc.part.rels.values():
             if "image" in rel.target_ref:
                 try:
-                    ext = rel.target_ref.split('.')[-1].lower()
-                    mime = f"image/{'jpeg' if ext in ('jpg','jpeg') else ext}"
-                    img_bytes = rel.target_part.blob
-                    images.append({'bytes': img_bytes, 'mime': mime})
-                except Exception: pass
-        final = '\n\n'.join(lines)
-        if not final.strip():
-            res = mammoth.convert_to_html(io.BytesIO(file_bytes))
-            final = BeautifulSoup(res.value, 'html.parser').get_text('\n', strip=True)
-        return {'text': final, 'images': images}
+                    ext=rel.target_ref.split('.')[-1].lower()
+                    mime=f"image/{'jpeg' if ext in ('jpg','jpeg') else ext}"
+                    images.append({'bytes':rel.target_part.blob,'mime':mime})
+                except: pass
+        text='\n\n'.join(lines)
+        if not text.strip():
+            res=mammoth.convert_to_html(io.BytesIO(raw))
+            text=BeautifulSoup(res.value,'html.parser').get_text('\n',strip=True)
+        return {'text':text,'images':images}
     except Exception as e:
-        st.error(f"Word xatolik: {e}")
-        return {'text': '', 'images': []}
+        st.error(f"Word xatolik: {e}"); return {'text':'','images':[]}
 
-
-def extract_pdf(file_bytes: bytes) -> dict:
+def extract_pdf(raw:bytes)->dict:
     try:
-        r = PyPDF2.PdfReader(io.BytesIO(file_bytes))
-        return {'text': '\n\n'.join(p.extract_text() or '' for p in r.pages), 'images': []}
+        r=PyPDF2.PdfReader(io.BytesIO(raw))
+        return {'text':'\n\n'.join(p.extract_text() or '' for p in r.pages),'images':[]}
     except Exception as e:
-        st.error(f"PDF xatolik: {e}")
-        return {'text': '', 'images': []}
+        st.error(f"PDF xatolik: {e}"); return {'text':'','images':[]}
 
 
-# ==================== JSON TUZATISH ====================
-def fix_json_escapes(raw: str) -> str:
-    VALID = set(r'"\\bfnrtu/')
-    result, in_str, esc = [], False, False
-    for ch in raw:
-        if esc:
-            if in_str and ch not in VALID:
-                result.append('\\')
-            result.append(ch)
-            esc = False
-            continue
-        if ch == '\\':
-            esc = True
-            result.append(ch)
-            continue
-        if ch == '"':
-            in_str = not in_str
-        result.append(ch)
+# ──────────── JSON TUZATISH (KUCHAYTIRILGAN) ────────────
+def aggressive_json_fix(raw:str)->str:
+    """LaTeX backslash larni JSON ichida to'g'irlash."""
+    # 1) markdown bloklarini olib tashlash
+    raw=re.sub(r'```(?:json)?\s*','',raw).strip().rstrip('`').strip()
+
+    # 2) JSON massivini topish
+    start=raw.find('[')
+    end=raw.rfind(']')
+    if start==-1 or end==-1 or end<=start:
+        return raw
+    raw=raw[start:end+1]
+
+    # 3) Barcha \\ ni to'g'ri qilish: LaTeX uchun \\ → \\\\
+    #    Lekin faqat JSON string ichidagi qismlarda
+    result=[]
+    in_str=False
+    i=0
+    while i<len(raw):
+        ch=raw[i]
+        if ch=='"' and (i==0 or raw[i-1]!='\\'):
+            in_str=not in_str
+            result.append(ch);i+=1;continue
+        if in_str and ch=='\\' and i+1<len(raw):
+            nxt=raw[i+1]
+            # Standart JSON escape: " \ / b f n r t u
+            if nxt in '"\\\/bfnrtu':
+                result.append(ch);result.append(nxt);i+=2;continue
+            else:
+                # LaTeX: bitta \ → ikki marta \\
+                result.append('\\\\');i+=1;continue
+        result.append(ch);i+=1
     return ''.join(result)
 
-
-def safe_json(text: str):
-    for fn in [json.loads,
-               lambda t: json.loads(fix_json_escapes(t)),
-               lambda t: json.loads(re.sub(r'\\(?!["\\\\bfnrtu])', r'\\\\', t))]:
+def safe_json(text:str):
+    """Ko'p usulda JSON parse qilishga harakat."""
+    attempts=[
+        text,
+        aggressive_json_fix(text),
+        re.sub(r'\\(?!["\\\/bfnrtu])',r'\\\\',text),
+    ]
+    for attempt in attempts:
+        # Massivni ajratib olish
+        start=attempt.find('[')
+        end=attempt.rfind(']')
+        if start==-1 or end<=start: continue
+        chunk=attempt[start:end+1]
         try:
-            return fn(text)
+            return json.loads(chunk)
         except:
             pass
     return None
 
 
-# ==================== AI TAHLIL ====================
-def parse_questions_with_ai(text: str, image_bytes_list: list) -> list:
+# ──────────── AI: SAVOLLARNI TAHLIL QILISH ────────────
+def parse_questions_with_ai(text:str, image_bytes_list:list)->list:
     if not GROQ_API_KEY:
-        st.error("⚠️ GROQ_API_KEY topilmadi.")
-        return []
+        st.error("⚠️ GROQ_API_KEY topilmadi."); return []
 
-    image_descriptions = ""
+    # Rasm tahlili
+    img_desc=""
     if image_bytes_list:
         with st.spinner("🖼️ Rasmlar tahlil qilinmoqda..."):
-            for idx, img_bytes in enumerate(image_bytes_list):
+            for idx,ib in enumerate(image_bytes_list):
                 try:
-                    img_array = np.array(Image.open(io.BytesIO(img_bytes)))
-                    if is_geometric_image(img_array):
-                        desc = analyze_image_with_cohere(img_bytes)
-                        image_descriptions += f"\n\n📸 Rasm {idx+1}: {desc}"
-                except Exception:
-                    pass
+                    arr=np.array(Image.open(io.BytesIO(ib)))
+                    if is_geometric_image(arr):
+                        img_desc+=f"\n\nRasm {idx+1}: {analyze_image_with_cohere(ib)}"
+                except: pass
 
-    client = Groq(api_key=GROQ_API_KEY)
-
-    # ✅ Savollar sonini to'g'ri sanash: "1." yoki "1)" formatlari
-    lines = [l.strip() for l in text.split('\n') if l.strip()]
-    question_numbers = set()
-    for l in lines:
-        m = re.match(r'^(\d+)\s*[\.\)]\s', l)
+    # Savollar sonini aniqlash
+    nums=set()
+    for line in text.split('\n'):
+        m=re.match(r'^(\d+)\s*[\.\)]\s',line.strip())
         if m:
-            n = int(m.group(1))
-            if 1 <= n <= 100:
-                question_numbers.add(n)
-    num_ask = len(question_numbers) if question_numbers else 10
-    st.info(f"📊 Faylda topilgan savollar soni: **{num_ask}**")
+            n=int(m.group(1))
+            if 1<=n<=200: nums.add(n)
+    num_ask=len(nums) if nums else 10
+    st.info(f"📊 Faylda taxminan **{num_ask}** ta savol aniqlandi")
 
-    prompt = f"""Bu MATEMATIKA olimpiada test savollari. Faylda JAMI {num_ask} TA SAVOL bor.
-SENGA BARCHA {num_ask} TA SAVOLNI AJRATIB OLISH SHART. Birortasini ham qoldirma!
+    client=Groq(api_key=GROQ_API_KEY)
+
+    # ─── MUHIM: Oddiy prompt, JSON buzilmasin ───
+    # LaTeX formulalarni SAQLASH KERAK emas JSON ichida murakkab escape
+    # Shuning uchun formulalarni ODDIY MATN sifatida so'raymiz
+    prompt=f"""Bu matematika testi. Barcha {num_ask} ta savolni JSON formatda qaytar.
 
 QOIDALAR:
-1. Matematik formulalar ($...$ yoki $$...$$) — AYNAN ko'chir, o'zgartirma.
-2. \\cdot, \\frac, \\sqrt, ^, _ kabi LaTeX belgilarni saqla.
-3. Har bir savolda A, B, C, D variantlar bo'lishi shart.
-4. To'g'ri javobni MATEMATIK YECHIB aniqla (taxmin qilma).
-5. JSON string ichida backslash IKKITA bo'lsin: \\\\frac, \\\\sqrt, \\\\cdot.
-6. FAQAT JSON massivi qaytar — boshqa matn YOZMA.
-7. Savollar soni AYNAN {num_ask} TA bo'lsin.
+1. Faqat JSON massivi qaytar. Boshqa hech narsa yozma.
+2. JSON string ichida backslash IKKI MARTA yoziladi: \\\\frac, \\\\sqrt, \\\\cdot
+3. Formulalardagi $ belgilarini saqlama - faqat formulaning o'zini yoz
+4. Har bir savolda A, B, C, D variantlar majburiy
+5. correct: faqat "A", "B", "C" yoki "D"
 
-Format:
 [
   {{
     "number": 1,
-    "question": "Savol matni ($\\\\frac{{a}}{{b}}$ kabi formulalar bilan)",
-    "options": {{"A":"...","B":"...","C":"...","D":"..."}},
+    "question": "Savol matni",
+    "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}},
     "correct": "B",
-    "explanation": "Qisqa matematik yechim"
+    "explanation": "Qisqa yechim"
   }}
 ]
 
 MATN:
-{text[:20000]}
-
-{image_descriptions}"""
+{text[:12000]}
+{img_desc}"""
 
     try:
-        resp = client.chat.completions.create(
+        resp=client.chat.completions.create(
             model='llama-3.3-70b-versatile',
-            messages=[{'role': 'user', 'content': prompt}],
-            temperature=0.1,
+            messages=[{'role':'user','content':prompt}],
+            temperature=0.05,
             max_tokens=8192,
         )
-        content = resp.choices[0].message.content.strip()
-        content = re.sub(r'```(?:json)?\s*', '', content).strip().rstrip('`').strip()
+        raw=resp.choices[0].message.content.strip()
 
-        m = re.search(r'\[.*\]', content, re.DOTALL)
-        if not m:
-            st.warning("JSON topilmadi")
-            return []
+        # Debug: AI javobini ko'rish
+        with st.expander("🔍 AI javobi (debug)", expanded=False):
+            st.code(raw[:2000], language="text")
 
-        result = safe_json(m.group())
+        result=safe_json(raw)
+
         if result is None:
-            st.error("JSON parse muvaffaqiyatsiz")
-            return []
+            st.error("❌ JSON parse qilinmadi. Debug ma'lumotini ko'ring.")
+            # Oxirgi harakat: har bir savolni alohida parse qilish
+            result=manual_extract(raw)
 
-        if len(result) < num_ask:
-            st.warning(f"⚠️ AI faqat {len(result)}/{num_ask} ta savol qaytardi.")
-        else:
-            st.success(f"✅ {len(result)} ta savol muvaffaqiyatli olindi")
+        if result:
+            if len(result)<num_ask:
+                st.warning(f"⚠️ AI {len(result)}/{num_ask} ta savol qaytardi")
+            else:
+                st.success(f"✅ {len(result)} ta savol muvaffaqiyatli olindi!")
+        return result or []
 
-        return result
     except Exception as e:
-        st.error(f"AI xatosi: {e}")
-        return []
+        st.error(f"AI xatosi: {e}"); return []
 
 
-# ==================== YORDAMCHILAR ====================
+def manual_extract(text:str)->list:
+    """JSON buzilgan bo'lsa, regex bilan savollarni qo'lda ajratish."""
+    questions=[]
+    # Har bir { ... } blokni topish
+    blocks=re.findall(r'\{[^{}]+\}',text,re.DOTALL)
+    for block in blocks:
+        try:
+            # Oddiy qilib tozalash
+            fixed=aggressive_json_fix('{'+block.strip('{}')+'}')
+            obj=json.loads(fixed)
+            if 'question' in obj and 'options' in obj:
+                if 'correct' not in obj: obj['correct']='A'
+                if 'number' not in obj: obj['number']=len(questions)+1
+                if 'explanation' not in obj: obj['explanation']=''
+                questions.append(obj)
+        except:
+            pass
+    return questions
+
+
+# ──────────── Yordamchilar ────────────
 def grade(pct):
-    if pct >= 85: return "5 — A'lo"
-    if pct >= 70: return "4 — Yaxshi"
-    if pct >= 50: return "3 — Qoniqarli"
-    return "2 — Qoniqarsiz"
-
+    if pct>=85: return "5 — A'lo 🥇"
+    if pct>=70: return "4 — Yaxshi 🥈"
+    if pct>=50: return "3 — Qoniqarli 🥉"
+    return "2 — Qoniqarsiz 📚"
 
 def fmt_time(sec):
-    h, r = divmod(sec, 3600)
-    m, s = divmod(r, 60)
+    h,r=divmod(sec,3600);m,s=divmod(r,60)
     return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
-# ==================== SESSION STATE ====================
-DEFAULTS = {
-    'questions': [], 'current_q': 0, 'answers': {},
-    'started': False, 'finished': False,
-    'name': '', 'surname': '',
-    'duration': 90, 'start_time': None,
-    'uploaded_files': [], 'images': [], 'image_map': {},
+# ──────────── Session state ────────────
+DEFAULTS={
+    'questions':[],'current_q':0,'answers':{},
+    'started':False,'finished':False,
+    'name':'','surname':'',
+    'duration':90,'start_time':None,
+    # BUG-FIX: bytes sifatida saqlash (rerun'da yo'qolmaydi)
+    'file_data':[],'image_map':{},
 }
-for k, v in DEFAULTS.items():
+for k,v in DEFAULTS.items():
     if k not in st.session_state:
-        st.session_state[k] = v
+        st.session_state[k]=v
 
 
-# ==================== SIDEBAR ====================
+# ──────────── Sidebar ────────────
 with st.sidebar:
     st.markdown("### 👤 Foydalanuvchi")
-    st.session_state.name = st.text_input("Ism", st.session_state.name)
+    st.session_state.name    = st.text_input("Ism",      st.session_state.name)
     st.session_state.surname = st.text_input("Familiya", st.session_state.surname)
-
     st.markdown("---")
     st.markdown("### ⚙️ Sozlamalar")
-    st.session_state.duration = st.number_input("⏱ Vaqt (daqiqa)", 5, 300, st.session_state.duration)
-
+    st.session_state.duration = st.number_input("⏱ Vaqt (daqiqa)",5,300,st.session_state.duration)
     st.markdown("---")
-    st.markdown("### 📁 Test fayllari")
-    uploaded = st.file_uploader("Fayl yuklang (.docx yoki .pdf)",
-                                type=["docx", "pdf"], accept_multiple_files=True)
-    if uploaded:
-        st.session_state.uploaded_files = uploaded
-        for f in uploaded:
-            st.success(f"✅ {f.name}")
+    st.markdown("### 📁 Test fayli")
+
+    # BUG-FIX: faqat test boshlanmagan paytda yuklash
+    if not st.session_state.started:
+        uploaded=st.file_uploader("Fayl yuklang (.docx yoki .pdf)",
+                                   type=["docx","pdf"],accept_multiple_files=True)
+        if uploaded:
+            st.session_state.file_data=[
+                {'name':f.name,'bytes':f.read()} for f in uploaded
+            ]
+
+    for fd in st.session_state.file_data:
+        st.success(f"✅ {fd['name']}")
 
     if st.session_state.started and not st.session_state.finished:
         st.markdown("---")
-        if st.button("⛔ Testni to'xtatish", use_container_width=True):
-            st.session_state.finished = True
-            st.rerun()
+        if st.button("⛔ Testni to'xtatish",use_container_width=True):
+            st.session_state.finished=True;st.rerun()
 
 
-# ==================== ASOSIY SAHIFA ====================
+# ──────────── Asosiy sahifa ────────────
 st.title("🏆 OlimpTest — Matematika")
 st.markdown("#### Matematika Olimpiada Mashq Platformasi")
 
-# ─── BOSHLASH ────────────────────────────────────────
+
+# ═══ BOSHLASH ═══
 if not st.session_state.started:
     st.markdown("""
-<div style="background:rgba(255,255,255,0.05); padding:20px; border-radius:12px; border:1px solid rgba(255,215,0,0.3);">
+<div style="background:rgba(255,255,255,0.05);padding:20px;border-radius:12px;border:1px solid rgba(255,215,0,0.3);">
 <h3>📋 Qo'llanma</h3>
 <ol>
 <li>Ism-familiyangizni kiriting</li>
-<li>Word (.docx) yoki PDF fayl yuklang</li>
-<li>Vaqt belgilang va "Testni boshlash" tugmasini bosing</li>
-<li>Matematik formulalar va rasmlar avtomatik aniqlanadi</li>
+<li>Word (.docx) yoki PDF matematika test faylini yuklang</li>
+<li>Vaqt belgilang va testni boshlang</li>
+<li>Formulalar (KaTeX) va rasmlar avtomatik ko'rsatiladi</li>
 </ol>
-</div>
-    """, unsafe_allow_html=True)
+</div>""",unsafe_allow_html=True)
 
-    if st.session_state.uploaded_files and st.session_state.name.strip():
-        if st.button("🚀 Testni boshlash", type="primary", use_container_width=True):
-            with st.spinner("📖 Fayl o'qilmoqda..."):
-                all_text, all_images = "", []
-                for f in st.session_state.uploaded_files:
-                    raw = f.read()
-                    data = extract_docx(raw) if f.name.lower().endswith('.docx') else extract_pdf(raw)
-                    all_text += data['text'] + '\n\n'
-                    all_images += data.get('images', [])
+    ready=bool(st.session_state.file_data and st.session_state.name.strip())
+    if not st.session_state.name.strip(): st.info("⬅️ Ismingizni kiriting")
+    if not st.session_state.file_data:   st.info("⬅️ Fayl yuklang")
 
-            if not all_text.strip():
-                st.error("❌ Fayldan matn olinmadi.")
-                st.stop()
+    if ready and st.button("🚀 Testni boshlash",type="primary",use_container_width=True):
+        with st.spinner("📖 Fayl o'qilmoqda..."):
+            all_text,all_images="",[]
+            for fd in st.session_state.file_data:
+                raw=fd['bytes']
+                data=(extract_docx(raw) if fd['name'].lower().endswith('.docx')
+                      else extract_pdf(raw))
+                all_text+=data['text']+'\n\n'
+                all_images+=data.get('images',[])
 
-            with st.spinner("🤖 AI matematika savollarini tahlil qilmoqda..."):
-                image_bytes_list = [img['bytes'] for img in all_images]
-                questions = parse_questions_with_ai(all_text, image_bytes_list)
+        if not all_text.strip():
+            st.error("❌ Fayldan matn olinmadi.");st.stop()
 
-            if not questions:
-                st.error("❌ Savollar tahlil qilinmadi.")
-                st.stop()
+        with st.spinner("🤖 AI matematika savollarni tahlil qilmoqda..."):
+            img_bytes_list=[img['bytes'] for img in all_images]
+            questions=parse_questions_with_ai(all_text,img_bytes_list)
 
-            # Rasmlarni savollar bilan bog'lash
-            image_map = {}
-            geometric_imgs = []
-            for img_bytes in image_bytes_list:
-                try:
-                    img_array = np.array(Image.open(io.BytesIO(img_bytes)))
-                    if is_geometric_image(img_array):
-                        geometric_imgs.append(img_bytes)
-                except Exception:
-                    pass
+        if not questions:
+            st.error("❌ Savollar tahlil qilinmadi. Debug ma'lumotini ko'ring.");st.stop()
 
-            if geometric_imgs and questions:
-                for idx in range(len(questions)):
-                    start = (idx * len(geometric_imgs)) // len(questions)
-                    end = ((idx + 1) * len(geometric_imgs)) // len(questions)
-                    if start < end:
-                        image_map[idx] = geometric_imgs[start:end]
+        # Rasm → savol bog'lash
+        geo_imgs=[ib for ib in img_bytes_list
+                  if (lambda b: is_geometric_image(np.array(Image.open(io.BytesIO(b)))))(ib)]
+        image_map={}
+        n_q,n_img=len(questions),len(geo_imgs)
+        if n_img and n_q:
+            for idx in range(n_q):
+                s=(idx*n_img)//n_q; e=((idx+1)*n_img)//n_q
+                if s<e: image_map[idx]=geo_imgs[s:e]
 
-            st.session_state.questions = questions
-            st.session_state.images = all_images
-            st.session_state.image_map = image_map
-            st.session_state.started = True
-            st.session_state.start_time = time.time()
-            st.session_state.current_q = 0
-            st.session_state.answers = {}
-            st.rerun()
-    else:
-        if not st.session_state.name.strip():
-            st.info("⬅️ Ismingizni kiriting")
-        if not st.session_state.uploaded_files:
-            st.info("⬅️ Fayl yuklang")
-
-# ─── TEST ─────────────────────────────────────────────
-elif not st.session_state.finished:
-    elapsed = time.time() - st.session_state.start_time
-    remaining = max(0, int(st.session_state.duration * 60 - elapsed))
-    if remaining == 0:
-        st.session_state.finished = True
+        st.session_state.questions=questions
+        st.session_state.image_map=image_map
+        st.session_state.started=True
+        st.session_state.start_time=time.time()
+        st.session_state.current_q=0
+        st.session_state.answers={}
         st.rerun()
 
-    questions = st.session_state.questions
-    total_q = len(questions)
-    q_idx = st.session_state.current_q
-    q = questions[q_idx]
 
-    h1, h2, h3 = st.columns([2, 3, 1])
-    with h1:
-        st.markdown(f"### 👤 {st.session_state.name} {st.session_state.surname}")
+# ═══ TEST ═══
+elif not st.session_state.finished:
+    # BUG-FIX: streamlit-autorefresh — har 1 soniyada yengillashtiradi
+    st_autorefresh(interval=1000, key="math_timer")
+
+    elapsed=time.time()-st.session_state.start_time
+    remaining=max(0,int(st.session_state.duration*60-elapsed))
+    if remaining==0:
+        st.session_state.finished=True;st.rerun()
+
+    questions=st.session_state.questions
+    total_q=len(questions)
+    q_idx=st.session_state.current_q
+    q=questions[q_idx]
+
+    # Header
+    h1,h2,h3=st.columns([2,3,1])
+    with h1: st.markdown(f"### 👤 {st.session_state.name} {st.session_state.surname}")
     with h2:
-        answered = len(st.session_state.answers)
-        st.progress(answered / total_q, text=f"Javob berilgan: {answered}/{total_q}")
+        ans_count=len(st.session_state.answers)
+        st.progress(ans_count/total_q,text=f"Javob berilgan: {ans_count}/{total_q}")
     with h3:
-        tcls = "timer-urgent" if remaining < 60 else "timer-box"
-        st.markdown(f'<div class="{tcls}">⏱ {fmt_time(remaining)}</div>', unsafe_allow_html=True)
+        tcls="timer-urgent" if remaining<60 else "timer-box"
+        st.markdown(f'<div class="{tcls}">⏱ {fmt_time(remaining)}</div>',unsafe_allow_html=True)
 
     st.markdown("---")
-    st.markdown(f"### Savol {q_idx + 1} / {total_q}")
+    st.markdown(f"### Savol {q_idx+1} / {total_q}")
 
-    q_num = q.get('number', q_idx + 1)
-    q_text = q.get('question', 'Savol topilmadi')
-    if q_text:
-        render_math_html(f"{q_num}. {q_text}", font_size="20px")
-    else:
-        st.warning("Savol matni ko'rinmadi")
+    render_math_html(f"<b>{q.get('number',q_idx+1)}.</b> {q.get('question','Savol topilmadi')}",
+                     font_size="20px")
 
+    # Rasm
     if q_idx in st.session_state.image_map:
         st.markdown("### 🖼️ Rasm:")
-        image_bytes_list = st.session_state.image_map[q_idx]
-        cols = st.columns(min(2, len(image_bytes_list)))
-        for col_idx, img_bytes in enumerate(image_bytes_list):
-            with cols[col_idx % 2]:
+        imgs=st.session_state.image_map[q_idx]
+        cols=st.columns(min(2,len(imgs)))
+        for ci,ib in enumerate(imgs):
+            with cols[ci%2]:
                 try:
-                    img = Image.open(io.BytesIO(img_bytes))
-                    st.image(img, use_column_width=True)
-                except Exception:
-                    st.error("Rasm ko'rinmadi")
+                    # BUG-FIX: use_container_width (deprecated use_column_width o'rniga)
+                    st.image(Image.open(io.BytesIO(ib)),use_container_width=True)
+                except: st.error("Rasm ko'rsatilmadi")
 
     st.markdown("---")
 
-    options = q.get('options', {})
-    opt_keys = list(options.keys())
-    prev_ans = st.session_state.answers.get(q_idx)
+    # Variantlar — radio (button o'rniga: kamroq rerun)
+    options=q.get('options',{})
+    opt_keys=list(options.keys())
+    opt_labels=[f"{k}) {options[k]}" for k in opt_keys]
+    prev_ans=st.session_state.answers.get(q_idx)
+    prev_idx=opt_keys.index(prev_ans) if prev_ans in opt_keys else None
 
     st.markdown("**Javobingizni tanlang:**")
-    for k in opt_keys:
-        v = options[k]
-        col1, col2 = st.columns([0.08, 0.92])
-        with col1:
-            checked = (prev_ans == k)
-            if st.button("●" if checked else "○", key=f"opt_{q_idx}_{k}", help=k):
-                st.session_state.answers[q_idx] = k
-                st.rerun()
-        with col2:
-            render_math_html(
-                f"{k}) {v}",
-                font_size="18px",
-                bg="rgba(255,215,0,0.08)" if (prev_ans == k) else "transparent"
-            )
+    chosen=st.radio("",options=opt_labels,index=prev_idx,
+                    label_visibility="collapsed",key=f"r_{q_idx}")
+    if chosen:
+        st.session_state.answers[q_idx]=chosen.split(")")[0].strip()
 
-    nav1, nav2, nav3 = st.columns([1, 1, 1])
-    with nav1:
-        if q_idx > 0 and st.button("⬅️ Oldingi", use_container_width=True):
-            st.session_state.current_q -= 1
-            st.rerun()
-    with nav2:
-        if q_idx < total_q - 1 and st.button("Keyingi ➡️", use_container_width=True):
-            st.session_state.current_q += 1
-            st.rerun()
-    with nav3:
-        if st.button("✅ Yakunlash", type="primary", use_container_width=True):
-            st.session_state.finished = True
-            st.rerun()
+    # KaTeX bilan ko'rish
+    with st.expander("🔍 Formulalar bilan ko'rish"):
+        for k in opt_keys:
+            bg="rgba(255,215,0,0.1)" if st.session_state.answers.get(q_idx)==k else "transparent"
+            render_math_html(f"<b>{k})</b> {options[k]}",font_size="17px",bg=bg)
 
+    # Navigatsiya
+    n1,n2,n3=st.columns(3)
+    with n1:
+        if q_idx>0 and st.button("⬅️ Oldingi",use_container_width=True):
+            st.session_state.current_q-=1;st.rerun()
+    with n2:
+        if q_idx<total_q-1 and st.button("Keyingi ➡️",use_container_width=True):
+            st.session_state.current_q+=1;st.rerun()
+    with n3:
+        if st.button("✅ Yakunlash",type="primary",use_container_width=True):
+            st.session_state.finished=True;st.rerun()
+
+    # Mini panel
     st.markdown("---")
-    st.markdown("**Savollar paneli** (✓ = javob berilgan):")
-    COLS = 10
-    for rs in range(0, total_q, COLS):
-        row_qs = list(range(rs, min(rs + COLS, total_q)))
-        cols = st.columns(len(row_qs))
-        for col, i in zip(cols, row_qs):
+    st.markdown("**Savollar paneli:**")
+    for rs in range(0,total_q,10):
+        row=list(range(rs,min(rs+10,total_q)))
+        cols=st.columns(len(row))
+        for col,i in zip(cols,row):
             with col:
-                lbl = f"✓{i+1}" if i in st.session_state.answers else str(i+1)
-                btyp = "primary" if i == q_idx else "secondary"
-                if st.button(lbl, key=f"nav_{i}", type=btyp, use_container_width=True):
-                    st.session_state.current_q = i
-                    st.rerun()
+                lbl=f"✓{i+1}" if i in st.session_state.answers else str(i+1)
+                bt="primary" if i==q_idx else "secondary"
+                if st.button(lbl,key=f"nav_{i}",type=bt,use_container_width=True):
+                    st.session_state.current_q=i;st.rerun()
 
-    time.sleep(1)
-    st.rerun()
 
-# ─── NATIJA ───────────────────────────────────────────
+# ═══ NATIJA ═══
 else:
-    questions = st.session_state.questions
-    total_q = len(questions)
-    correct = sum(1 for i, q in enumerate(questions)
-                  if st.session_state.answers.get(i) == q.get('correct'))
-    pct = (correct / total_q * 100) if total_q else 0.0
+    questions=st.session_state.questions
+    total_q=len(questions)
+    correct=sum(1 for i,q in enumerate(questions)
+                if st.session_state.answers.get(i)==q.get('correct'))
+    pct=(correct/total_q*100) if total_q else 0.0
 
     st.markdown("## 🎉 Test yakunlandi!")
     st.markdown(f"**{st.session_state.name} {st.session_state.surname}**")
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("✅ To'g'ri", f"{correct}/{total_q}")
+    c1,c2,c3,c4=st.columns(4)
+    c1.metric("✅ To'g'ri",   f"{correct}/{total_q}")
     c2.metric("❌ Noto'g'ri", f"{total_q-correct}/{total_q}")
-    c3.metric("📊 Foiz", f"{pct:.1f}%")
-    c4.metric("🎓 Baho", grade(pct))
+    c3.metric("📊 Foiz",      f"{pct:.1f}%")
+    c4.metric("🎓 Baho",      grade(pct))
 
-    color = "#2ECC71" if pct >= 70 else "#E67E22" if pct >= 50 else "#E74C3C"
+    color="#2ECC71" if pct>=70 else "#E67E22" if pct>=50 else "#E74C3C"
     st.markdown(
-        f'<div style="background:{color}; padding:20px; border-radius:12px; text-align:center; color:white; font-size:24px; font-weight:bold; margin:20px 0;">'
+        f'<div style="background:{color};padding:18px;border-radius:12px;'
+        f'text-align:center;color:white;font-size:22px;font-weight:bold;margin:16px 0;">'
         f'Natija: {pct:.1f}% — {grade(pct)}</div>',
-        unsafe_allow_html=True
-    )
+        unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown("### 📋 Batafsil natijalar")
-    for i, q in enumerate(questions):
-        user_ans = st.session_state.answers.get(i)
-        correct_ans = q.get('correct', '?')
-        is_correct = user_ans == correct_ans
-        icon = "✅" if is_correct else ("❌" if user_ans else "⬜")
-
-        with st.expander(f"{icon}  Savol {i+1}  |  Sizning: {user_ans or '—'}  |  To'g'ri: {correct_ans}"):
-            render_math_html(f"Savol: {q['question']}")
-            for k, v in q.get('options', {}).items():
-                if k == correct_ans:
-                    render_math_html(f"✅ {k}) {v}", bg="rgba(46,204,113,0.15)")
-                elif k == user_ans:
-                    render_math_html(f"❌ {k}) {v}", bg="rgba(231,76,60,0.15)")
-                else:
-                    render_math_html(f"  {k}) {v}", bg="transparent")
+    for i,q in enumerate(questions):
+        user_ans=st.session_state.answers.get(i)
+        correct_ans=q.get('correct','?')
+        ok=user_ans==correct_ans
+        icon="✅" if ok else ("❌" if user_ans else "⬜")
+        with st.expander(f"{icon} Savol {i+1}  |  Siz: {user_ans or '—'}  |  To'g'ri: {correct_ans}"):
+            render_math_html(f"<b>Savol:</b> {q['question']}")
+            for k,v in q.get('options',{}).items():
+                if k==correct_ans:   render_math_html(f"✅ <b>{k})</b> {v}",bg="rgba(46,204,113,0.15)")
+                elif k==user_ans:    render_math_html(f"❌ <b>{k})</b> {v}",bg="rgba(231,76,60,0.15)")
+                else:                render_math_html(f"&nbsp;&nbsp;{k}) {v}",bg="transparent")
             if q.get('explanation'):
                 st.info(f"💡 **Yechim:** {q['explanation']}")
 
-    if st.button("🔄 Yangi test", type="primary", use_container_width=True):
-        for k in list(st.session_state.keys()):
-            del st.session_state[k]
+    if st.button("🔄 Yangi test",type="primary",use_container_width=True):
+        for k in list(st.session_state.keys()): del st.session_state[k]
         st.rerun()
 
 st.markdown("---")
-st.markdown(
-    "<p style='text-align:center; color:#888; font-size:12px;'>Yaratuvchi: Usmonov Sodiq</p>",
-    unsafe_allow_html=True,
-)
+st.markdown("<p style='text-align:center;color:#888;font-size:12px;'>Yaratuvchi: Usmonov Sodiq</p>",
+            unsafe_allow_html=True)
