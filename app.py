@@ -576,33 +576,46 @@ def parse_questions(elements: list, img_desc: str = "") -> list:
 def build_image_map(questions: list, pos_images: dict,
                     geo_imgs_all: list) -> dict:
     """
-    Birlamchi: pozitsion bog'lash (docx dagi joylashuvga ko'ra).
-    Zahira:   has_image=True bo'lgan savollar navbatma-navbat rasm oladi.
+    Savol indeksi (0-based) -> [bytes,...] xaritasi.
+    1. Birlamchi: pozitsion (docx joylashuvi bo'yicha).
+    2. Zahira:   has_image=True yoki matnda rasm so'zi.
     """
-    # Birlamchi: pozitsion
-    if pos_images:
-        return {
-            # Savol indeksini savol raqami bo'yicha topish
-            next((i for i,q in enumerate(questions) if q.get('number')==qn), -1): imgs
-            for qn, imgs in pos_images.items()
-            if any(i for i,q in enumerate(questions) if q.get('number')==qn)
-        }
-
-    # Zahira: has_image asosida
-    if not geo_imgs_all: return {}
-    IMG_KW = re.compile(r'rasm|shakl|chizma|rasmda|figura|berilgan|ko\'rsatilgan',re.I)
-    img_qs = [i for i,q in enumerate(questions)
-              if q.get('has_image') or IMG_KW.search(q.get('question',''))]
-    if not img_qs:
-        return {0: geo_imgs_all[:1]}
-
     result = {}
+
+    # ── 1. Pozitsion ──────────────────────────────────
+    if pos_images:
+        num_to_idx = {q.get('number'): i for i, q in enumerate(questions)}
+        for qn, imgs in pos_images.items():
+            idx = num_to_idx.get(qn)
+            if idx is not None and imgs:
+                result[idx] = imgs
+        if result:
+            return result
+
+    # ── 2. Zahira: has_image + kalit so'zlar ──────────
+    if not geo_imgs_all:
+        return {}
+
+    IMG_KW = re.compile(
+        r'rasm|shakl|chizma|rasmda|rasmdan|figura'
+        r'|ko\'rsatilgan|berilgan ma\'lumot|berilgan rasm',
+        re.I
+    )
+    img_qs = [
+        i for i, q in enumerate(questions)
+        if q.get('has_image') or IMG_KW.search(q.get('question', ''))
+    ]
+
+    if not img_qs:
+        return {0: geo_imgs_all}
+
     for j, q_idx in enumerate(img_qs):
         if j < len(geo_imgs_all):
             result[q_idx] = [geo_imgs_all[j]]
-    # Oxirgi savol — qolgan rasmlar
-    if img_qs and len(geo_imgs_all) > len(img_qs):
-        result[img_qs[-1]] = geo_imgs_all[len(img_qs)-1:]
+
+    if len(geo_imgs_all) > len(img_qs):
+        result[img_qs[-1]] = geo_imgs_all[len(img_qs) - 1:]
+
     return result
 
 
@@ -804,24 +817,30 @@ elif not st.session_state.finished:
 
     st.markdown("---")
 
-    # Variantlar (radio + KaTeX expander)
-    options   = q.get('options', {})
-    opt_keys  = list(options.keys())
-    opt_labels= [f"{k}) {options[k]}" for k in opt_keys]
-    prev_ans  = st.session_state.answers.get(q_idx)
-    prev_idx  = opt_keys.index(prev_ans) if prev_ans in opt_keys else None
+    # ── Variantlar: KaTeX render + tugma tanlash ──────
+    options  = q.get('options', {})
+    opt_keys = list(options.keys())
+    prev_ans = st.session_state.answers.get(q_idx)
 
     st.markdown("**Javobingizni tanlang:**")
-    chosen = st.radio("", options=opt_labels, index=prev_idx,
-                      label_visibility="collapsed", key=f"r_{q_idx}")
-    if chosen:
-        st.session_state.answers[q_idx] = chosen.split(")")[0].strip()
-
-    with st.expander("🔢 Formulalar bilan variantlarni ko'rish"):
-        for k in opt_keys:
-            bg = "rgba(255,215,0,0.1)" if st.session_state.answers.get(q_idx)==k \
-                 else "rgba(255,255,255,0.03)"
-            render_math(f"<b>{k})</b> {options[k]}", "17px", bg)
+    for k in opt_keys:
+        checked = (prev_ans == k)
+        bg = "rgba(255,215,0,0.12)" if checked else "rgba(255,255,255,0.03)"
+        border = "2px solid #FFD700" if checked else "1px solid rgba(255,215,0,0.2)"
+        c1, c2 = st.columns([0.08, 0.92])
+        with c1:
+            # Tanlanganlik belgisi
+            icon = "🟡" if checked else "⚪"
+            if st.button(icon, key=f"sel_{q_idx}_{k}", use_container_width=True):
+                st.session_state.answers[q_idx] = k
+                st.rerun()
+        with c2:
+            render_math(
+                f"<b>{k})</b>  {options[k]}",
+                font_size="17px",
+                bg=bg,
+                height=58
+            )
 
     # Navigatsiya
     n1,n2,n3 = st.columns(3)
@@ -889,11 +908,11 @@ else:
                     except: pass
             for k,v in q.get('options',{}).items():
                 if k==corr:
-                    render_math(f"✅ <b>{k})</b> {v}", bg="rgba(46,204,113,0.15)")
+                    render_math(f"✅ <b>{k})</b>  {v}", bg="rgba(46,204,113,0.15)", height=58)
                 elif k==user_ans:
-                    render_math(f"❌ <b>{k})</b> {v}", bg="rgba(231,76,60,0.15)")
+                    render_math(f"❌ <b>{k})</b>  {v}", bg="rgba(231,76,60,0.15)", height=58)
                 else:
-                    render_math(f"&nbsp;&nbsp;{k}) {v}", bg="transparent")
+                    render_math(f"&nbsp;&nbsp;<b>{k})</b>  {v}", bg="rgba(255,255,255,0.02)", height=58)
             if q.get('explanation'):
                 st.info(f"💡 **Yechim:** {q['explanation']}")
 
