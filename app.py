@@ -45,6 +45,22 @@ st.markdown("""
 # ══════════════════════════════════════════════════════
 #  KaTeX RENDER  (components.html — skriptlar ishlaydi)
 # ══════════════════════════════════════════════════════
+def auto_latex(text: str) -> str:
+    """
+    Variantlardagi LaTeX ni avtomatik $ ... $ ichiga o'rash.
+    Misol: (3;infty) => $(3;\\infty)$  |  84deg => 84deg (ozgarmaydi)
+    """
+    if not text:
+        return text
+    # Allaqachon $ ichida bo'lsa — o'zgartirmaslik
+    if '$' in text:
+        return text
+    # LaTeX buyrug'i bo'lsa (\word) — butunini $...$ ichiga olish
+    if re.search(r'\\[a-zA-Z]', text):
+        return f'${text}$'
+    return text
+
+
 def render_math(text: str, font_size: str = "19px",
                 bg: str = "rgba(255,255,255,0.05)", height: int = None):
     lines  = text.count('<br') + text.count('\n') + 1
@@ -302,14 +318,17 @@ def extract_docx(raw: bytes) -> tuple:
     try:
         doc = Document(io.BytesIO(raw))
 
-        # Barcha rasmlar: rel_id → bytes
+        # Barcha rasmlar: rel_id -> bytes (barcha part lardan)
         img_map = {}
-        for rel_id, rel in doc.part.rels.items():
-            if "image" in rel.target_ref:
-                try:
-                    img_map[rel_id] = rel.target_part.blob
-                except:
-                    pass
+        def _collect_imgs(part):
+            for rid, rel in part.rels.items():
+                if 'image' in rel.target_ref and rid not in img_map:
+                    try: img_map[rid] = rel.target_part.blob
+                    except: pass
+        _collect_imgs(doc.part)
+        for _part in list(doc.part.related_parts.values()):
+            try: _collect_imgs(_part)
+            except: pass
 
         elements        = []
         question_images = {}   # {q_num: [bytes,...]}
@@ -320,12 +339,35 @@ def extract_docx(raw: bytes) -> tuple:
 
         def para_imgs(p_el):
             imgs = []
+            NS_V = 'urn:schemas-microsoft-com:vml'
+            NS_O = 'urn:schemas-microsoft-com:office:office'
+
+            # 1. Modern DrawingML (a:blip)
             for blip in p_el.findall(f'.//{{{NS_A}}}blip'):
                 rid = blip.get(f'{{{NS_R}}}embed') or blip.get(f'{{{NS_R}}}link')
                 if rid and rid in img_map:
                     b = img_map[rid]
                     if is_geometric(b):
                         imgs.append(b)
+
+            # 2. Legacy VML (v:imagedata) — Word 2003 formatidagi rasmlar
+            for imgdata in p_el.findall(f'.//{{{NS_V}}}imagedata'):
+                rid = imgdata.get(f'{{{NS_R}}}id') or imgdata.get(f'{{{NS_R}}}href')
+                if rid and rid in img_map:
+                    b = img_map[rid]
+                    if is_geometric(b):
+                        imgs.append(b)
+
+            # 3. w:pict ichidagi rasmlar
+            NS_W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+            for pict in p_el.findall(f'.//{{{NS_W}}}pict'):
+                for imgdata in pict.findall(f'.//{{{NS_V}}}imagedata'):
+                    rid = imgdata.get(f'{{{NS_R}}}id')
+                    if rid and rid in img_map:
+                        b = img_map[rid]
+                        if is_geometric(b):
+                            imgs.append(b)
+
             return imgs
 
         def process_para(p_el):
@@ -490,79 +532,113 @@ def safe_json(raw: str):
 # ══════════════════════════════════════════════════════
 #  AI: Savollarni tahlil qilish (chunk bo'lib)
 # ══════════════════════════════════════════════════════
+# Groq TPM limit: 12000 token/daqiqa
+# Xavfsiz: max_tokens=4096 + chunk=3500 ~ 7500 token/sorov
+GROQ_MAX_TOKENS = 4096
+CHUNK_SIZE      = 3500
+RETRY_WAIT      = 65   # rate limit kutish (sekund)
+MAX_RETRIES     = 3
+
+
 def call_ai_chunk(chunk: str, client, img_desc: str,
                   chunk_num: int, total: int) -> list:
-    prompt = f"""Matematika olimpiada testi (bo'lak {chunk_num}/{total}).
-Bu bo'lakdagi BARCHA savollarni ajratib ol.
+    prompt = f"""Matematika olimpiada testi (bolak {chunk_num}/{total}).
+Bu bolakdagi BARCHA savollarni ajratib ol.
 
 QOIDALAR:
-1. Faqat JSON massivi qaytar — boshqa matn YOZMA.
+1. Faqat JSON massivi qaytar - boshqa matn YOZMA.
 2. LaTeX: \\\\frac, \\\\sqrt, \\\\cdot, \\\\left, \\\\right, \\\\leq (IKKI backslash!).
-3. has_image: savol matnida rasm/shakl/chizma/berilgan so'zlari bo'lsa TRUE.
-4. correct: faqat "A", "B", "C" yoki "D".
-5. Agar bo'lakda savol yo'q — [] qaytar.
+3. has_image: rasm/shakl/chizma/berilgan sozlari bolsa TRUE.
+4. correct: faqat "A","B","C" yoki "D".
+5. Bolakda savol yoq bolsa - [] qaytar.
 
-[{{
-  "number":1,
-  "question":"Savol ($\\\\frac{{a}}{{b}}$, $\\\\sqrt{{x}}$)",
-  "options":{{"A":"...","B":"...","C":"...","D":"..."}},
-  "correct":"B",
-  "explanation":"Yechim",
-  "has_image":false
-}}]
+[{{"number":1,"question":"...","options":{{"A":"...","B":"...","C":"...","D":"..."}},"correct":"B","explanation":"...","has_image":false}}]
 
 MATN:
 {chunk}
-{("\\nRASM TAVSIFI:\\n" + img_desc) if img_desc else ""}"""
+{("RASM: " + img_desc[:300]) if img_desc else ""}"""
 
-    try:
-        resp = client.chat.completions.create(
-            model='llama-3.3-70b-versatile',
-            messages=[{'role':'user','content':prompt}],
-            temperature=0.05, max_tokens=8192,
-        )
-        raw    = resp.choices[0].message.content.strip()
-        result = safe_json(raw)
-        return result if result else []
-    except Exception as e:
-        st.warning(f"Bo'lak {chunk_num} xatosi: {e}")
-        return []
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = client.chat.completions.create(
+                model='llama-3.3-70b-versatile',
+                messages=[{'role': 'user', 'content': prompt}],
+                temperature=0.05,
+                max_tokens=GROQ_MAX_TOKENS,
+            )
+            raw    = resp.choices[0].message.content.strip()
+            result = safe_json(raw)
+            return result if result else []
+
+        except Exception as e:
+            err = str(e)
+            if 'rate_limit' in err or '429' in err or 'TPM' in err or 'tokens per minute' in err:
+                # Xatodagi kutish vaqtini olish
+                m    = re.search(r'try again in ([0-9.]+)s', err)
+                wait = int(float(m.group(1))) + 5 if m else RETRY_WAIT * attempt
+                wait = min(wait, 120)
+
+                ph = st.empty()
+                for sec in range(wait, 0, -1):
+                    ph.warning(
+                        f"⏳ Groq rate limit — {sec}s kutilmoqda "
+                        f"(bolak {chunk_num}/{total}, urinish {attempt}/{MAX_RETRIES})..."
+                    )
+                    time.sleep(1)
+                ph.empty()
+            else:
+                st.warning(f"Bolak {chunk_num} xatosi: {err[:200]}")
+                return []
+
+    st.warning(f"Bolak {chunk_num}: {MAX_RETRIES}x urinildi, otkazib yuborildi.")
+    return []
+
 
 def parse_questions(elements: list, img_desc: str = "") -> list:
     if not GROQ_API_KEY:
-        st.error("⚠️ GROQ_API_KEY topilmadi."); return []
+        st.error("GROQ_API_KEY topilmadi."); return []
 
     lines     = [e['content'] for e in elements if e['type'] == 'text']
     full_text = '\n'.join(lines)
     if not full_text.strip(): return []
 
-    client    = Groq(api_key=GROQ_API_KEY)
-    CHUNK     = 7000
+    client = Groq(api_key=GROQ_API_KEY)
 
-    if len(full_text) <= CHUNK:
+    if len(full_text) <= CHUNK_SIZE:
         chunks = [full_text]
     else:
         chunks, cur, cur_len = [], [], 0
         for line in lines:
-            if cur_len + len(line) > CHUNK and cur:
+            if cur_len + len(line) > CHUNK_SIZE and cur:
                 chunks.append('\n'.join(cur))
-                cur = cur[-3:]; cur_len = sum(len(l) for l in cur)
-            cur.append(line); cur_len += len(line)
-        if cur: chunks.append('\n'.join(cur))
+                cur     = cur[-2:]   # 2 qator overlap
+                cur_len = sum(len(l) for l in cur)
+            cur.append(line)
+            cur_len += len(line)
+        if cur:
+            chunks.append('\n'.join(cur))
 
     all_qs, seen = [], set()
     pb = st.progress(0, text="AI savollarni tahlil qilmoqda...")
+
     for i, chunk in enumerate(chunks):
-        pb.progress((i+1)/len(chunks), text=f"Bo'lak {i+1}/{len(chunks)}...")
-        for q in call_ai_chunk(chunk, client, img_desc, i+1, len(chunks)):
+        pb.progress(
+            (i + 1) / len(chunks),
+            text=f"Bolak {i+1}/{len(chunks)} tahlil qilinyapti..."
+        )
+        for q in call_ai_chunk(chunk, client, img_desc, i + 1, len(chunks)):
             num = q.get('number')
             if num not in seen:
-                seen.add(num); all_qs.append(q)
-    pb.empty()
+                seen.add(num)
+                all_qs.append(q)
 
+        # Chunklar orasida pauza - TPM limitni kamaytirish
+        if i < len(chunks) - 1:
+            time.sleep(3)
+
+    pb.empty()
     all_qs.sort(key=lambda q: q.get('number', 999))
 
-    # Natija
     if all_qs:
         st.success(f"✅ {len(all_qs)} ta savol muvaffaqiyatli olindi!")
     else:
@@ -570,9 +646,6 @@ def parse_questions(elements: list, img_desc: str = "") -> list:
     return all_qs
 
 
-# ══════════════════════════════════════════════════════
-#  RASM-SAVOL BOG'LASH  (pozitsion BIRINCHI, has_image ZAHIRA)
-# ══════════════════════════════════════════════════════
 def build_image_map(questions: list, pos_images: dict,
                     geo_imgs_all: list) -> dict:
     """
@@ -824,22 +897,23 @@ elif not st.session_state.finished:
 
     st.markdown("**Javobingizni tanlang:**")
     for k in opt_keys:
-        checked = (prev_ans == k)
-        bg = "rgba(255,215,0,0.12)" if checked else "rgba(255,255,255,0.03)"
-        border = "2px solid #FFD700" if checked else "1px solid rgba(255,215,0,0.2)"
+        checked  = (prev_ans == k)
+        bg       = "rgba(255,215,0,0.12)" if checked else "rgba(255,255,255,0.03)"
+        opt_text = auto_latex(options[k])   # LaTeX ni $ ichiga olish
+        # Dinamik balandlik: formula uzunligiga qarab
+        h = max(58, min(120, 58 + len(opt_text) // 8))
         c1, c2 = st.columns([0.08, 0.92])
         with c1:
-            # Tanlanganlik belgisi
             icon = "🟡" if checked else "⚪"
             if st.button(icon, key=f"sel_{q_idx}_{k}", use_container_width=True):
                 st.session_state.answers[q_idx] = k
                 st.rerun()
         with c2:
             render_math(
-                f"<b>{k})</b>  {options[k]}",
+                f"<b>{k})</b>&nbsp;&nbsp;{opt_text}",
                 font_size="17px",
                 bg=bg,
-                height=58
+                height=h
             )
 
     # Navigatsiya
@@ -908,11 +982,11 @@ else:
                     except: pass
             for k,v in q.get('options',{}).items():
                 if k==corr:
-                    render_math(f"✅ <b>{k})</b>  {v}", bg="rgba(46,204,113,0.15)", height=58)
+                    render_math(f"✅ <b>{k})</b>&nbsp;&nbsp;{auto_latex(v)}", bg="rgba(46,204,113,0.15)", height=max(58,min(120,58+len(v)//8)))
                 elif k==user_ans:
-                    render_math(f"❌ <b>{k})</b>  {v}", bg="rgba(231,76,60,0.15)", height=58)
+                    render_math(f"❌ <b>{k})</b>&nbsp;&nbsp;{auto_latex(v)}", bg="rgba(231,76,60,0.15)", height=max(58,min(120,58+len(v)//8)))
                 else:
-                    render_math(f"&nbsp;&nbsp;<b>{k})</b>  {v}", bg="rgba(255,255,255,0.02)", height=58)
+                    render_math(f"&nbsp;&nbsp;<b>{k})</b>&nbsp;&nbsp;{auto_latex(v)}", bg="rgba(255,255,255,0.02)", height=max(58,min(120,58+len(v)//8)))
             if q.get('explanation'):
                 st.info(f"💡 **Yechim:** {q['explanation']}")
 
