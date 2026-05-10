@@ -45,17 +45,33 @@ st.markdown("""
 # ══════════════════════════════════════════════════════
 #  KaTeX RENDER  (components.html — skriptlar ishlaydi)
 # ══════════════════════════════════════════════════════
+def fix_latex_errors(text: str) -> str:
+    """
+    AI tomonidan yozilgan keng tarqalgan LaTeX xatolarini tuzatish.
+    Bu funksiya RENDER DAN OLDIN ishga tushadi.
+    """
+    if not text: return text
+    # \angleA → \angle A  (buyruq + harf orasida bo'shliq)
+    text = re.sub(r'\\angle([A-Za-z])', r'\\angle \1', text)
+    # \overrightarrowAB → \overrightarrow{AB}
+    text = re.sub(r'\\overrightarrow([A-Za-z]{1,3})(?![{a-zA-Z])', r'\\overrightarrow{\1}', text)
+    # \overlineAB → \overline{AB}
+    text = re.sub(r'\\overline([A-Za-z]{1,3})(?![{a-zA-Z])', r'\\overline{\1}', text)
+    # \vec([A-Z]) → \vec{\1}
+    text = re.sub(r'\\vec([A-Za-z])(?![{])', r'\\vec{\1}', text)
+    # \hat([A-Z]) → \hat{\1}
+    text = re.sub(r'\\hat([A-Za-z])(?![{])', r'\\hat{\1}', text)
+    return text
+
+
 def auto_latex(text: str) -> str:
     """
-    Variantlardagi LaTeX ni avtomatik $ ... $ ichiga o'rash.
-    Misol: (3;infty) => $(3;\\infty)$  |  84deg => 84deg (ozgarmaydi)
+    Variantlardagi LaTeX ni avtomatik $ ... $ ichiga orash.
+    Avval xatolarni tuzatadi, keyin delimiters qoshadi.
     """
-    if not text:
-        return text
-    # Allaqachon $ ichida bo'lsa — o'zgartirmaslik
-    if '$' in text:
-        return text
-    # LaTeX buyrug'i bo'lsa (\word) — butunini $...$ ichiga olish
+    if not text: return text
+    text = fix_latex_errors(text)
+    if '$' in text: return text
     if re.search(r'\\[a-zA-Z]', text):
         return f'${text}$'
     return text
@@ -269,16 +285,23 @@ def para_text(p_el) -> str:
 #  RASM TAHLILI
 # ══════════════════════════════════════════════════════
 def is_geometric(img_bytes: bytes) -> bool:
-    """Geometrik/matematik rasm ekanligini aniqlash"""
+    """
+    Matematika/geometriya rasmi ekanligini aniqlash.
+    Juda kichik (icon) rasmlarni filtrlaydi, qolganlarini qabul qiladi.
+    """
     try:
-        arr  = np.array(Image.open(io.BytesIO(img_bytes)).convert('RGB'))
-        gray = np.mean(arr, axis=2)
-        # Oz rang turli → geometrik chizma (oddiy qora-oq chiziqlar)
-        unique_ratio = len(np.unique(gray.astype(np.uint8))) / 256
-        dark_ratio   = np.sum(gray < 100) / gray.size
-        return unique_ratio < 0.5 or dark_ratio > 0.2
+        img  = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+        w, h = img.size
+        # Juda kichik rasmlar (icon/bullet) — o'tkazib yubor
+        if w < 30 or h < 30:
+            return False
+        # Juda katta rasm (background/texture) — o'tkazib yubor
+        if w > 3000 or h > 3000:
+            return False
+        # Qolganlarini qabul qilish (geometrik yoki jadval rasmi)
+        return True
     except:
-        return True  # Noma'lum → qabul qilish
+        return True
 
 def cohere_describe(img_bytes: bytes) -> str:
     """Cohere vision bilan rasm tavsifi"""
@@ -549,6 +572,7 @@ QOIDALAR:
 1. Faqat JSON massivi qaytar - boshqa matn YOZMA.
 2. LaTeX: \\\\frac, \\\\sqrt, \\\\cdot, \\\\left, \\\\right, \\\\leq (IKKI backslash!).
 3. has_image: rasm/shakl/chizma/berilgan sozlari bolsa TRUE.
+4. LaTeX: \\angle dan keyin BORISHLIQ qo'y: \\angle A, \\angle ABC (\\angleA emas!).
 4. correct: faqat "A","B","C" yoki "D".
 5. Bolakda savol yoq bolsa - [] qaytar.
 
@@ -875,7 +899,8 @@ elif not st.session_state.finished:
     st.markdown(f"### Savol {q_idx+1} / {total_q}")
 
     # Savol matni
-    render_math(f"<b>{q.get('number',q_idx+1)}.</b> {q.get('question','')}", "20px")
+    _q_text = fix_latex_errors(q.get('question',''))
+    render_math(f"<b>{q.get('number',q_idx+1)}.</b> {_q_text}", "20px")
 
     # Rasm (faqat shu savolniki)
     if q_idx in image_map:
@@ -975,7 +1000,7 @@ else:
         ok       = user_ans == corr
         icon     = "✅" if ok else ("❌" if user_ans else "⬜")
         with st.expander(f"{icon} Savol {i+1}  |  Siz: {user_ans or '—'}  |  To'g'ri: {corr}"):
-            render_math(f"<b>Savol:</b> {q['question']}")
+            render_math(f"<b>Savol:</b> {fix_latex_errors(q.get('question',''))}")
             if i in image_map:
                 for b in image_map[i]:
                     try: st.image(Image.open(io.BytesIO(b)), width=300)
